@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Pre-commit hook: run the test suite before allowing the commit.
+# - Skips integration tests (they need real API keys).
+# - Exits non-zero on any failure, blocking the commit.
+#
+# Setup (one-time, after cloning):
+#   git config core.hooksPath .githooks
+#
+# Bypass for a single commit (use sparingly):
+#   git commit --no-verify
+
+set -e
+
+cd "$(git rev-parse --show-toplevel)"
+
+echo "==> Running test suite (pre-commit)..."
+
+# Find a venv with pytest available; fall back to system python.
+PYTHON="${PYTHON:-python3}"
+if [ -d ".venv" ] && [ -x ".venv/bin/python" ]; then
+    PYTHON=".venv/bin/python"
+elif [ -d "../treval/.venv" ] && [ -x "../treval/.venv/bin/python" ]; then
+    PYTHON="../treval/.venv/bin/python"
+fi
+
+PYTHONPATH=. "$PYTHON" -m pytest tests/ -q --no-header -m "not integration" -x
+
+echo "==> Tests passed. Proceeding with commit."

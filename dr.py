@@ -26,6 +26,8 @@ DEFAULT_MAX_RESULTS = 3
 MAX_RETRIES = 3
 RETRY_BASE_SECONDS = 1.0  # Sleep = base * 2^attempt, so 1s, 2s, 4s...
 DEFAULT_TEMPERATURE = 0  # Deterministic output for research
+DEFAULT_TIMEOUT_SECONDS = 30  # Per-request timeout for the OpenAI client
+DEFAULT_SEARCH_DEPTH = "basic"  # Tavily: "basic" (cheap) or "advanced" (deeper)
 
 # Local SQLite cache for Tavily results (avoids repeat HTTP calls)
 CACHE_DB_PATH = Path.home() / ".treval" / "search_cache.db"
@@ -46,13 +48,18 @@ MODEL_PRICES = {
 
 
 @treval.tool(name="tavily.search")
-def search(query: str, max_results: int = DEFAULT_MAX_RESULTS) -> list[dict]:
+def search(query: str, max_results: int = DEFAULT_MAX_RESULTS,
+           search_depth: str = DEFAULT_SEARCH_DEPTH) -> list[dict]:
     """Search the web via Tavily and return a list of result dicts.
 
     Each dict has 'url', 'title', 'content' keys.
+
+    `search_depth` is "basic" (cheap, default) or "advanced" (deeper
+    relevance, ~3x more expensive per Tavily pricing).
     """
     client = TavilyClient(api_key=os.environ.get(TAVILY_KEY_ENV))
-    response = client.search(query=query, max_results=max_results)
+    response = client.search(query=query, max_results=max_results,
+                             search_depth=search_depth)
     return response.get("results", [])
 
 
@@ -109,18 +116,21 @@ def _cache_set(query: str, results: list[dict]) -> None:
 
 
 @treval.tool(name="tavily.search")
-def search_cached(query: str, max_results: int = DEFAULT_MAX_RESULTS) -> list[dict]:
+def search_cached(query: str, max_results: int = DEFAULT_MAX_RESULTS,
+                  search_depth: str = DEFAULT_SEARCH_DEPTH) -> list[dict]:
     """Search the web via Tavily with a local TTL cache.
 
     On cache hit, returns the cached results instantly (no HTTP call).
     On cache miss or expired entry, calls Tavily and stores the result.
     The @treval.tool span records either way; cache hits show as ~0.1ms
     duration in the dashboard.
+
+    `search_depth` is "basic" (default) or "advanced".
     """
     cached = _cache_get(query)
     if cached is not None:
         return cached
-    results = search(query, max_results=max_results)
+    results = search(query, max_results=max_results, search_depth=search_depth)
     _cache_set(query, results)
     return results
 
@@ -211,7 +221,8 @@ def _is_transient_error(exc: Exception) -> bool:
 
 def ask(prompt: str, model: str = DEFAULT_MODEL, context: str | None = None,
         system: str | None = None, fallback: str | None = None,
-        max_retries: int = MAX_RETRIES, stream: bool = False):
+        max_retries: int = MAX_RETRIES, stream: bool = False,
+        timeout: float | None = DEFAULT_TIMEOUT_SECONDS):
     """Call the LLM with retry-on-transient and optional model fallback.
 
     Tries `model` up to `max_retries` times. On exhausted retries, if
@@ -256,6 +267,7 @@ def ask(prompt: str, model: str = DEFAULT_MODEL, context: str | None = None,
                     temperature=DEFAULT_TEMPERATURE,
                     max_tokens=2000,
                     stream=True,
+                    timeout=timeout,
                 )
                 for chunk in resp:
                     if chunk.choices and chunk.choices[0].delta.content:
@@ -286,6 +298,7 @@ def ask(prompt: str, model: str = DEFAULT_MODEL, context: str | None = None,
                     messages=messages,
                     temperature=DEFAULT_TEMPERATURE,
                     max_tokens=2000,
+                    timeout=timeout,
                 )
                 text = resp.choices[0].message.content or ""
                 usage = {}

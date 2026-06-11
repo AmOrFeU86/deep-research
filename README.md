@@ -125,12 +125,22 @@ Each run prints:
 ## Tests
 
 ```bash
-# Full suite (83 tests, ~6s, no API keys needed)
+# Full suite (93 tests, ~6s, no API keys needed for unit tests)
 pytest tests/ -q
 
 # Integration only (requires OPENROUTER_API_KEY + TAVILY_API_KEY)
 pytest -m integration -v
 ```
+
+### Pre-commit hook (optional but recommended)
+
+Run the test suite automatically before each commit:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Bypass for a single commit (use sparingly): `git commit --no-verify`.
 
 ## Architecture
 
