@@ -1,0 +1,47 @@
+[project]
+name = "deep-research"
+version = "0.1.0"
+description = "CLI for web-grounded LLM research with treval tracing, tokens & costs"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    {name = "Gabriel Llaurado Queralt"},
+]
+keywords = ["ai", "llm", "research", "search", "tavily", "openrouter", "treval", "observability", "rag"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+dependencies = [
+    "treval>=0.2.0",
+    "openai>=1.0.0",
+    "tavily-python>=0.5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/AmOrFeU86/deep-research"
+Repository = "https://github.com/AmOrFeU86/deep-research"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+deep-research = "dr:main"
+dr = "dr:main"
+
+[tool.setuptools]
+py-modules = ["dr"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: tests that hit external APIs (Tavily, OpenRouter) — require API keys in env",
+]
