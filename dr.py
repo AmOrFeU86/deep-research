@@ -231,6 +231,52 @@ def format_sources(results: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def enforce_citations(text: str, num_sources: int,
+                      strip: bool = False) -> tuple[str, list[int]]:
+    """Find every [N] in `text` and flag any that point past `num_sources`.
+
+    The LLM is told in the system prompt that it must only cite [1]..[N]
+    for N = len(sources), but in practice it occasionally invents
+    citations like [7] when only 3 sources exist. This function is the
+    static (regex) check: it returns the list of invalid citation numbers
+    so the CLI can warn the user, and optionally strips them from the
+    text so the output doesn't ship with broken references.
+
+    Detection: a single integer (allowing optional leading minus) inside
+    square brackets. Brackets that contain anything else (e.g. [v1.0],
+    [ref]) are ignored — they are not citations.
+
+    Args:
+        text: the LLM response to scan.
+        num_sources: how many real sources exist (citations must satisfy
+            1 <= N <= num_sources).
+        strip: if True, remove invalid [N] tokens from the returned text
+            (preserving surrounding whitespace so words don't collapse).
+
+    Returns:
+        (cleaned_text, invalid_numbers) where invalid_numbers is a
+        sorted, de-duplicated list of every N that was out of range.
+    """
+    import re
+    pattern = re.compile(r"\[(-?\d+)\]")
+
+    invalid_set: set[int] = set()
+    for match in pattern.finditer(text):
+        n = int(match.group(1))
+        if not (1 <= n <= num_sources):
+            invalid_set.add(n)
+
+    cleaned = text
+    if strip and invalid_set:
+        # Build a single regex that matches any of the invalid citations.
+        # Escape the negative sign — re.escape on "-7" gives "\\-7" but
+        # we already accept "-?\d+" so a plain "-" needs no escape here.
+        bad = "|".join(re.escape(f"[{n}]") for n in sorted(invalid_set))
+        cleaned = re.sub(bad, "", text)
+
+    return cleaned, sorted(invalid_set)
+
+
 def _require_env(var: str) -> str:
     """Read an env var; abort with a clear message if missing."""
     val = os.environ.get(var)
@@ -480,6 +526,16 @@ def _run_research(prompt: str, depth: int = 1,
         tavily_searches = len(queries)
         usage["tavily_searches"] = tavily_searches
         usage["tavily_cost_usd"] = round(tavily_searches * TAVILY_COST_PER_SEARCH_USD, 5)
+
+        # Static citation enforcement: warn the user if the LLM invented
+        # [N] that don't correspond to a real source. We don't strip them
+        # by default — leaving the LLM text intact and just flagging
+        # the problem is the safer default.
+        _, invalid = enforce_citations(response, num_sources=len(all_results))
+        if invalid:
+            print(f"⚠️  Invalid citations in response: {invalid} "
+                  f"(only {len(all_results)} sources available)")
+
         store.update(root_id, output=response)
         return response, all_results, usage
     finally:
@@ -521,6 +577,12 @@ def _run_research_streaming(prompt: str, depth: int = 1,
             full_response.append(token)
         print()  # newline after stream completes
         response = "".join(full_response)
+
+        # Static citation enforcement on the joined streamed text.
+        _, invalid = enforce_citations(response, num_sources=len(all_results))
+        if invalid:
+            print(f"\n⚠️  Invalid citations in response: {invalid} "
+                  f"(only {len(all_results)} sources available)")
 
         print(f"\n{'─' * 40}")
         sources = format_sources(all_results)
