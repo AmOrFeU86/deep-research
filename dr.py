@@ -116,7 +116,21 @@ def _cache_set(query: str, results: list[dict]) -> None:
         conn.close()
 
 
-@treval.tool(name="tavily.search")
+def _tavily_metadata(args, kwargs, result):
+    """Build the metadata dict for a tavily.search span.
+
+    Stored as JSON in the span's metadata column and rendered in the
+    treval dashboard detail panel. Keeps each Tavily call self-describing:
+    what we asked for, the limit, and how many results came back.
+    """
+    return {
+        "query": kwargs.get("query", args[0] if args else None),
+        "max_results": kwargs.get("max_results", DEFAULT_MAX_RESULTS),
+        "num_results": len(result),
+    }
+
+
+@treval.tool(name="tavily.search", metadata_fn=_tavily_metadata)
 def search_cached(query: str, max_results: int = DEFAULT_MAX_RESULTS,
                   search_depth: str = DEFAULT_SEARCH_DEPTH) -> list[dict]:
     """Search the web via Tavily with a local TTL cache.
