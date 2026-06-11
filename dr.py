@@ -48,7 +48,6 @@ MODEL_PRICES = {
 }
 
 
-@treval.tool(name="tavily.search")
 def search(query: str, max_results: int = DEFAULT_MAX_RESULTS,
            search_depth: str = DEFAULT_SEARCH_DEPTH) -> list[dict]:
     """Search the web via Tavily and return a list of result dicts.
@@ -57,6 +56,12 @@ def search(query: str, max_results: int = DEFAULT_MAX_RESULTS,
 
     `search_depth` is "basic" (cheap, default) or "advanced" (deeper
     relevance, ~3x more expensive per Tavily pricing).
+
+    This function is the undecorated raw helper kept around for tests
+    and direct use. The traced, cache-fronted path is `search_cached`,
+    which is the one wrapped by `@treval.tool` and given a metadata_fn
+    in #8. Callers should use `search_cached`; calling `search` directly
+    will still produce a span, but without the structured metadata.
     """
     client = TavilyClient(api_key=os.environ.get(TAVILY_KEY_ENV))
     response = client.search(query=query, max_results=max_results,

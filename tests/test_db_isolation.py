@@ -19,8 +19,8 @@ def test_during_tests_db_path_lives_in_tmp_path():
     assert "pytest" in str(db_path) or str(db_path).startswith("/tmp/")
 
 
-def test_search_writes_to_isolated_db_not_real_one(tmp_path):
-    """dr.search() with the real SpanStore writes to tmp_path, not ~/.treval/spans.db."""
+def test_search_cached_writes_to_isolated_db_not_real_one(tmp_path):
+    """dr.search_cached() with the real SpanStore writes to tmp_path, not ~/.treval/spans.db."""
     import dr
 
     real_db = Path.home() / ".treval" / "spans.db"
@@ -31,7 +31,7 @@ def test_search_writes_to_isolated_db_not_real_one(tmp_path):
         instance.search.return_value = {
             "results": [{"url": "https://x", "title": "X", "content": "x"}],
         }
-        dr.search("isolation test query")
+        dr.search_cached("isolation test query")
 
     # 1. The isolated DB (the one we monkey-patched) gained a row
     from treval import db

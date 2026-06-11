@@ -63,9 +63,10 @@ def test_tavily_search_span_is_child_of_research():
     roots = store.list_spans(limit=10, type="OPERATION")
     research_id = roots[0]["id"]
 
-    # Cache miss → 2 TOOL spans: the cache wrapper + the underlying search()
+    # Cache miss → 1 TOOL span from search_cached (the inner search()
+    # helper is undecorated, so it doesn't produce a phantom span).
     tools = store.list_spans(limit=10, type="TOOL")
-    assert len(tools) == 2
+    assert len(tools) == 1
     for t in tools:
         assert t["name"] == "tavily.search"
         assert t["parent_id"] == research_id
