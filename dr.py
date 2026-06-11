@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import treval
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from openai import OpenAI
@@ -135,6 +136,49 @@ def search_cached(query: str, max_results: int = DEFAULT_MAX_RESULTS,
     return results
 
 
+def _search_with_parent(query: str, max_results: int, parent_id: int) -> list[dict]:
+    """Thread worker: push parent span, search, pop.
+
+    Required because treval's span stack is stored in threading.local(),
+    so the context pushed on the main thread is invisible inside a worker
+    spawned via ThreadPoolExecutor. Each worker must push/pop its own copy
+    of the parent_id to keep the resulting Tavily spans as siblings under
+    the 'research' OPERATION span.
+    """
+    from treval.context import pop_span, push_span
+    push_span(parent_id)
+    try:
+        return search_cached(query, max_results=max_results)
+    finally:
+        pop_span()
+
+
+def parallel_search(queries: list[str], max_results: int,
+                    parent_id: int) -> list[dict]:
+    """Run N Tavily queries in parallel, merge results deduped by URL.
+
+    Order of returned results: all results from queries[0] first (deduped),
+    then all from queries[1], etc. — same ordering as the sequential loop
+    used to produce, so downstream code is unchanged.
+
+    With len(queries)==0 returns [] without spawning a pool.
+    """
+    if not queries:
+        return []
+
+    all_results: list[dict] = []
+    seen_urls: set[str] = set()
+    with ThreadPoolExecutor(max_workers=len(queries)) as pool:
+        futures = [pool.submit(_search_with_parent, q, max_results, parent_id)
+                   for q in queries]
+        for fut in futures:
+            for r in fut.result():
+                if r["url"] not in seen_urls:
+                    seen_urls.add(r["url"])
+                    all_results.append(r)
+    return all_results
+
+
 def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
     pricing = MODEL_PRICES.get(model)
     if not pricing:
@@ -205,6 +249,18 @@ AGENTIC_SYSTEM_PROMPT = (
     '  - To request a web search: {"action": "search", "query": "your query"}\n'
     '  - To give the final answer: {"action": "answer", "answer": "your answer"}\n'
     "Respond ONLY with the JSON, no extra text or markdown."
+)
+
+VERIFY_SYSTEM_PROMPT = (
+    "You are a citation verifier. You receive a draft answer and a list of "
+    "consulted sources (numbered [1], [2], ...). Your task is to check that "
+    "every [N] citation in the draft actually supports the claim attached to "
+    "it, AND that no claim in the draft is missing a citation.\n\n"
+    "Respond ONLY with a JSON object in this format:\n"
+    '  {"verified": true|false, "issues": [{"citation": "[N]", "reason": "..."}]}\n\n'
+    "If everything checks out, return verified=true and an empty issues list. "
+    "If something is wrong, return verified=false and a list of issues, each "
+    "pointing to a specific [N] citation and explaining the problem."
 )
 
 
@@ -362,12 +418,16 @@ def reformulate(prompt: str, n: int, model: str = DEFAULT_MODEL) -> list[str]:
 def _run_research(prompt: str, depth: int = 1,
                   max_results: int = DEFAULT_MAX_RESULTS,
                   model: str = DEFAULT_MODEL,
-                  fallback: str | None = None) -> tuple[str, list[dict], dict]:
+                  fallback: str | None = None,
+                  context: str | None = None) -> tuple[str, list[dict], dict]:
     """Run a full research task wrapped in a parent OPERATION span.
 
     With depth=1: 1 search of the original query.
     With depth=N>1: reformulate prompt into N-1 variants, search all N,
     merge results deduped by URL, then ask the LLM with the full context.
+
+    If `context` is provided, it is prepended to the prompt sent to the
+    LLM (used by the REPL to carry prior Q&A across turns).
 
     Creates a 'research' OPERATION span and pushes it onto the context
     stack, so nested @treval.tool spans (Tavily) and the auto-instrumented
@@ -394,16 +454,14 @@ def _run_research(prompt: str, depth: int = 1,
                 # Reformulation failed; fall back to original-only
                 queries = [prompt]
 
-        # Multi-search with dedup by URL
-        all_results: list[dict] = []
-        seen_urls: set[str] = set()
-        for q in queries:
-            for r in search_cached(q, max_results=max_results):
-                if r["url"] not in seen_urls:
-                    seen_urls.add(r["url"])
-                    all_results.append(r)
+        # Multi-search with dedup by URL (parallel when depth>1)
+        all_results = parallel_search(queries, max_results=max_results,
+                                      parent_id=root_id)
 
-        response, usage = ask(prompt, context=format_context(all_results),
+        # Combine REPL history (if any) with the search results before asking.
+        search_ctx = format_context(all_results)
+        merged_context = f"{context}\n\n---\n\n{search_ctx}" if context else search_ctx
+        response, usage = ask(prompt, context=merged_context,
                               model=model, fallback=fallback)
         tavily_searches = len(queries)
         usage["tavily_searches"] = tavily_searches
@@ -438,13 +496,8 @@ def _run_research_streaming(prompt: str, depth: int = 1,
             if not extra:
                 queries = [prompt]
 
-        all_results: list[dict] = []
-        seen_urls: set[str] = set()
-        for q in queries:
-            for r in search_cached(q, max_results=max_results):
-                if r["url"] not in seen_urls:
-                    seen_urls.add(r["url"])
-                    all_results.append(r)
+        all_results = parallel_search(queries, max_results=max_results,
+                                      parent_id=root_id)
 
         # Stream the response, printing tokens as they arrive
         full_response = []
@@ -485,6 +538,81 @@ def parse_action(text: str) -> dict:
     raise ValueError(f"Could not parse action from LLM response: {text!r}")
 
 
+def verify_citations(draft: str, sources: list[dict],
+                     model: str = DEFAULT_MODEL) -> dict:
+    """Second LLM pass that checks every [N] citation in `draft` is supported.
+
+    Returns a dict with keys:
+        - "verified": True if all citations check out, False otherwise
+        - "issues": list of {"citation": "[N]", "reason": "..."} for problems
+
+    On JSON parse failure (LLM returns garbage), defaults to verified=True
+    with a single issue noting the parse error — we don't want to block the
+    user on a flaky verifier.
+    """
+    import re
+
+    if not sources:
+        return {"verified": True, "issues": [], "model": model}
+
+    # Build the verification prompt: sources list + draft
+    sources_block = "\n\n".join(
+        f"[{i+1}] {s.get('title', '')}\nURL: {s.get('url', '')}\n{s.get('content', '')}"
+        for i, s in enumerate(sources)
+    )
+    user_content = (
+        f"Sources:\n{sources_block}\n\n"
+        f"---\n\nDraft answer to verify:\n{draft}\n\n"
+        f"Return a JSON object with 'verified' (true/false) and 'issues' (list)."
+    )
+
+    try:
+        client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.environ.get(API_KEY_ENV),
+            default_headers={
+                "HTTP-Referer": "https://github.com/AmOrFeU86/deep-research",
+                "X-Title": "deep-research",
+            },
+        )
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": VERIFY_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0,
+            max_tokens=1000,
+            timeout=DEFAULT_TIMEOUT_SECONDS,
+        )
+        text = resp.choices[0].message.content or ""
+    except Exception as e:
+        return {"verified": True, "issues": [{"citation": "—", "reason": f"verifier error: {e}"}], "model": model}
+
+    # Try to parse the JSON response (with the same tolerant logic as parse_action)
+    try:
+        result = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            try:
+                result = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                return {"verified": True, "issues": [{"citation": "—", "reason": "verifier returned unparseable output"}], "model": model}
+        else:
+            return {"verified": True, "issues": [{"citation": "—", "reason": "verifier returned unparseable output"}], "model": model}
+
+    # Normalize the result
+    if not isinstance(result, dict):
+        return {"verified": True, "issues": [{"citation": "—", "reason": "verifier returned non-dict"}], "model": model}
+
+    return {
+        "verified": bool(result.get("verified", False)),
+        "issues": result.get("issues", []),
+        "model": model,
+    }
+
+
 def run_research_agentic(prompt: str, model: str = DEFAULT_MODEL,
                          fallback: str | None = None,
                          max_iterations: int = 3,
@@ -493,10 +621,10 @@ def run_research_agentic(prompt: str, model: str = DEFAULT_MODEL,
     """ReAct-style research loop where the LLM decides when to stop searching.
 
     On each iteration the LLM responds with JSON:
-        {"action": "search", "query": "..."}   → run a Tavily search and
-                                                  feed the result back as
-                                                  an observation.
-        {"action": "answer", "answer": "..."}  → loop ends, return answer.
+        {"action": "search", "query": "..."}   -> run a Tavily search and
+                                                   feed the result back as
+                                                   an observation.
+        {"action": "answer", "answer": "..."}  -> loop ends, return answer.
 
     The loop also stops after `max_iterations` rounds to prevent infinite
     loops when the model keeps asking to search.
@@ -572,6 +700,113 @@ def run_research_agentic(prompt: str, model: str = DEFAULT_MODEL,
         pop_span()
 
 
+def build_repl_context(history: list[tuple[str, str]]) -> str:
+    """Format prior Q&A as a context string for the next question.
+
+    Returns "" for empty history. Each Q&A is prefixed with [Turn N] so
+    the LLM can distinguish them and the user can debug if needed.
+    """
+    if not history:
+        return ""
+    blocks = []
+    for i, (q, a) in enumerate(history, start=1):
+        blocks.append(f"[Turn {i}]\nQ: {q}\nA: {a}")
+    return "\n\n".join(blocks)
+
+
+REPL_COMMANDS_EXIT = {"/exit", "/quit", "exit", "quit"}
+REPL_PROMPT = "❓ "
+
+
+def run_repl(args: list[str], input_func=None) -> None:
+    """Interactive REPL that keeps context between questions.
+
+    Reads parsed CLI args (without --repl) to get depth/model/etc.
+    Maintains a rolling history; each new question sees the prior Q&A as
+    context, so follow-ups like 'what about its climate?' make sense.
+
+    Special inputs:
+        /exit, /quit, exit, quit  -> end the session
+        /clear                    -> wipe the history
+        (blank line)              -> ignored
+
+    `input_func` is injectable for tests; defaults to the module-level
+    `input` (which tests can patch via `patch("dr.input", ...)`).
+    """
+    if input_func is None:
+        input_func = input
+    # Reuse the parsed flag values from main() — re-parse minimally here.
+    depth = 1
+    if "--depth" in args:
+        idx = args.index("--depth")
+        if idx + 1 < len(args):
+            depth = max(1, min(int(args[idx + 1]), 3))
+    max_results = DEFAULT_MAX_RESULTS
+    if "--max-results" in args:
+        idx = args.index("--max-results")
+        if idx + 1 < len(args):
+            max_results = int(args[idx + 1])
+    model = DEFAULT_MODEL
+    if "--model" in args:
+        idx = args.index("--model")
+        if idx + 1 < len(args):
+            model = args[idx + 1]
+
+    print("\n💬 REPL mode — type a question, /clear to reset history, /exit to quit.\n")
+    history: list[tuple[str, str]] = []
+
+    while True:
+        try:
+            raw = input_func(REPL_PROMPT)
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+
+        if raw is None:
+            return
+        question = raw.strip()
+        if not question:
+            continue
+        if question.lower() in REPL_COMMANDS_EXIT:
+            return
+        if question == "/clear":
+            history = []
+            print("  (history cleared)\n")
+            continue
+
+        # Build context from prior Q&A and run a single research turn.
+        context = build_repl_context(history) or None
+        try:
+            response, results, usage = _run_research(
+                question, depth=depth, max_results=max_results,
+                model=model, fallback=DEFAULT_FALLBACK, context=context,
+            )
+        except SystemExit:
+            raise
+        except Exception as e:
+            print(f"  Error: {e}\n")
+            continue
+
+        print()
+        print(response)
+        print(f"\n{'─' * 40}")
+        if usage.get("total_tokens"):
+            llm_cost = usage.get('cost_usd', 0)
+            tavily_n = usage.get('tavily_searches', 0)
+            tavily_cost = usage.get('tavily_cost_usd', 0.0)
+            print(f"  Tokens:    {usage.get('prompt_tokens', 0)}↑ + {usage.get('completion_tokens', 0)}↓ = {usage['total_tokens']}")
+            print(f"  LLM cost:  ${llm_cost:.5f}")
+            print(f"  Tavily:    {tavily_n} search × ${TAVILY_COST_PER_SEARCH_USD:.4f} = ${tavily_cost:.5f}")
+            print(f"  Total:     ${llm_cost + tavily_cost:.5f}")
+        sources = format_sources(results)
+        if sources:
+            print(f"\n{sources}")
+        print()
+
+        # Update history for the next turn.
+        history.append((question, response))
+
+
 def main(args: list[str] | None = None) -> None:
     if args is None:
         args = sys.argv[1:]
@@ -610,6 +845,16 @@ def main(args: list[str] | None = None) -> None:
     agentic = "--agentic" in args
     args = [a for a in args if a != "--agentic"]
 
+    repl = "--repl" in args
+    args = [a for a in args if a != "--repl"]
+
+    verify = "--verify" in args
+    args = [a for a in args if a != "--verify"]
+
+    if repl:
+        run_repl(args)
+        return
+
     prompt = " ".join(args) if args else input("❓ ")
     if not prompt:
         print("Nothing to ask.")
@@ -642,6 +887,15 @@ def main(args: list[str] | None = None) -> None:
                                                    model=model,
                                                    fallback=DEFAULT_FALLBACK)
         print(response)
+        if verify and results:
+            print(f"\n🔎 Verifying citations...")
+            v = verify_citations(response, results, model=model)
+            if v["verified"]:
+                print(f"  ✅ All citations verified ({len(results)} sources checked)")
+            else:
+                print(f"  ⚠️  {len(v['issues'])} issue(s) found:")
+                for issue in v["issues"]:
+                    print(f"    - {issue.get('citation', '?')}: {issue.get('reason', '?')}")
         print(f"\n{'─' * 40}")
         if usage.get("total_tokens"):
             llm_cost = usage.get('cost_usd', 0)

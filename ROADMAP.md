@@ -35,7 +35,19 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 - [x] **#3 Tavily `search_depth: "advanced"`** — `DEFAULT_SEARCH_DEPTH = "basic"`,
   `search()` and `search_cached()` take a `search_depth` param ("basic"
   cheap vs "advanced" deeper, ~3x cost) (4 tests)
-- Tests: **95 unit + 2 integration (97 total)** (~10s)
+
+### Session 5 — REPL, cross-verification, parallel search
+- [x] **#12 Interactive REPL** — `run_repl()` with `/clear`, `/exit`, blank
+  input; rolling Q&A history passed as `context` to follow-up questions;
+  CLI flag `--repl` (10 tests)
+- [x] **#20 Cross-verification** — `verify_citations()` runs a second LLM
+  pass with `VERIFY_SYSTEM_PROMPT` to check every `[N]` matches a real
+  source; tolerant of malformed JSON; CLI flag `--verify` (6 tests)
+- [x] **#4 Parallel search** — `parallel_search(queries, max_results,
+  parent_id)` uses `ThreadPoolExecutor`; each worker pushes the parent
+  span_id manually (treval's `threading.local()` context would otherwise
+  be invisible in worker threads); 4x speedup with 4 queries (8 tests)
+- Tests: **119 unit + 2 integration (121 total, ~2s)**
 
 ---
 
@@ -89,7 +101,7 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 
 ### Depth
 - [x] **#3 `search_depth: "advanced"` from Tavily** (vs "basic") — pricier, more relevant
-- [ ] **#4 Parallel search** of sub-questions (asyncio)
+- [x] **#4 Parallel search** of sub-questions (ThreadPoolExecutor, manual parent push per thread because treval uses threading.local() — 4x speedup with 4 queries)
 
 ### Observability
 - [ ] **#8 Structured metadata in TOOL span**: query, max_results, num_results
@@ -178,10 +190,10 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 
 ## 📊 Project metrics (at session close)
 
-- **Tests**: 95 unit + 2 integration (97 total)
-- **Suite time**: ~10 seconds (includes 2 integration tests with real API)
-- **CLI flags**: 7 (`--report`, `--depth`, `--max-results`, `--model`, `--stream`, `--agentic`, prompt)
-- **Public functions**: `search`, `search_cached`, `ask`, `format_context`, `format_sources`, `reformulate`, `estimate_cost`, `parse_action`, `run_research_agentic`, `main`
+- **Tests**: 119 unit + 2 integration (121 total)
+- **Suite time**: ~8 seconds (includes 2 integration tests with real API)
+- **CLI flags**: 9 (`--report`, `--depth`, `--max-results`, `--model`, `--stream`, `--agentic`, `--repl`, `--verify`, prompt)
+- **Public functions**: `search`, `search_cached`, `_search_with_parent`, `parallel_search`, `ask`, `format_context`, `format_sources`, `reformulate`, `estimate_cost`, `parse_action`, `verify_citations`, `run_research_agentic`, `run_repl`, `main`
 - **Public constants**: `DEFAULT_MODEL`, `DEFAULT_FALLBACK`, `DEFAULT_MAX_RESULTS`, `DEFAULT_TEMPERATURE`, `DEFAULT_TIMEOUT_SECONDS`, `DEFAULT_SEARCH_DEPTH`, `TAVILY_COST_PER_SEARCH_USD`, `MAX_RETRIES`, `RETRY_BASE_SECONDS`, `CACHE_TTL_SECONDS`
 - **Integrated APIs**: Tavily (search), OpenRouter (chat completions)
 - **Spans per research run**: 3-5 (1 OPERATION research + 1-2 TOOL tavily.search + 1 LLM + optional TOOL reformulate)

@@ -20,7 +20,7 @@ Sources:
 ## Features
 
 - 🔍 **Always-on search** — every question is preceded by a web search (Tavily).
-- 🧠 **Multi-query with `--depth N`** — reformulates the question with the LLM and merges deduplicated results by URL.
+- 🧠 **Multi-query with `--depth N`** — reformulates the question with the LLM and runs all N queries in parallel via `ThreadPoolExecutor`, then merges deduplicated results by URL.
 - 🎯 **Forced citation** — the system prompt requires `[1]`, `[2]`...; if info is not in the sources, it says "Not found".
 - 🔁 **Retry with backoff + model fallback** — resilient to transient failures.
 - 💸 **Real cost report** — LLM tokens + Tavily searches summed in the footer.
