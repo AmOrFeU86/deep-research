@@ -24,7 +24,18 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
   verified, `twine check` PASSED, install in clean venv OK. **Still
   pending: explicit permission for `twine upload` and post-upload
   verification.**
-- Tests: **81 unit + 2 integration (83 total)** (~6s)
+
+### Session 4 — Quick wins
+- [x] **#18 Configurable timeout** — `DEFAULT_TIMEOUT_SECONDS = 30` constant,
+  `ask()` accepts a `timeout` param (None disables), both streaming and
+  non-streaming paths pass it through (4 tests)
+- [x] **#26 Pre-commit hook** — bash script at `.githooks/pre-commit` runs
+  `pytest -x -m "not integration"`, auto-discovers venv, bypass via
+  `--no-verify` (6 tests + manual end-to-end verification)
+- [x] **#3 Tavily `search_depth: "advanced"`** — `DEFAULT_SEARCH_DEPTH = "basic"`,
+  `search()` and `search_cached()` take a `search_depth` param ("basic"
+  cheap vs "advanced" deeper, ~3x cost) (4 tests)
+- Tests: **95 unit + 2 integration (97 total)** (~10s)
 
 ---
 
@@ -77,7 +88,7 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 ## 🟡 Medium priority
 
 ### Depth
-- [ ] **#3 `search_depth: "advanced"` from Tavily** (vs "basic") — pricier, more relevant
+- [x] **#3 `search_depth: "advanced"` from Tavily** (vs "basic") — pricier, more relevant
 - [ ] **#4 Parallel search** of sub-questions (asyncio)
 
 ### Observability
@@ -93,7 +104,7 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 ### Robustness
 - [x] **#16 Retry with exponential backoff**
 - [x] **#17 Model fallback**
-- [ ] **#18 Configurable timeout**
+- [x] **#18 Configurable timeout** (30s default, disable with `None`)
 
 ### Response quality
 - [ ] **#20 Cross-verification**: a second LLM pass to verify citations
@@ -101,7 +112,7 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 
 ### Distribution
 - [ ] **#25 GitHub Actions**: pytest + ruff on every PR
-- [ ] **#26 Pre-commit hook**: `pytest tests/ -x` before commit
+- [x] **#26 Pre-commit hook**: `pytest tests/ -x` before commit
 
 ---
 
@@ -131,6 +142,9 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 | 23 | README | 🟢 high | 🟢 low | ✅ |
 | 5 | Agentic ReAct loop | 🟢 high | 🟡 medium | ✅ |
 | 24 | Publish on PyPI | 🟢 high | 🟡 medium | 🔄 (infra ready, upload pending) |
+| 18 | Configurable timeout | 🟡 medium | 🟢 low | ✅ |
+| 26 | Pre-commit hook | 🟡 medium | 🟢 low | ✅ |
+| 3  | Tavily `search_depth: "advanced"` | 🟡 medium | 🟢 low | ✅ |
 
 ---
 
@@ -147,10 +161,10 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 ## 🚀 Suggested next steps (next session)
 
 **Low effort, high impact:**
-- **#24b** Finish PyPI (`twine upload` + post-upload verification)
+- ~~#24b Finish PyPI (`twine upload` + post-upload verification)~~ pending explicit permission
 
 **Advanced robustness:**
-- **#18** Configurable timeout in OpenAI client
+- ~~#18 Configurable timeout in OpenAI client~~ ✅ done
 - **#8** Structured metadata in spans (for post-mortem queries)
 
 **Product features:**
@@ -164,12 +178,15 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 
 ## 📊 Project metrics (at session close)
 
-- **Tests**: 81 unit + 2 integration (83 total)
-- **Suite time**: ~6 seconds (includes 2 integration tests with real API)
+- **Tests**: 95 unit + 2 integration (97 total)
+- **Suite time**: ~10 seconds (includes 2 integration tests with real API)
 - **CLI flags**: 7 (`--report`, `--depth`, `--max-results`, `--model`, `--stream`, `--agentic`, prompt)
 - **Public functions**: `search`, `search_cached`, `ask`, `format_context`, `format_sources`, `reformulate`, `estimate_cost`, `parse_action`, `run_research_agentic`, `main`
+- **Public constants**: `DEFAULT_MODEL`, `DEFAULT_FALLBACK`, `DEFAULT_MAX_RESULTS`, `DEFAULT_TEMPERATURE`, `DEFAULT_TIMEOUT_SECONDS`, `DEFAULT_SEARCH_DEPTH`, `TAVILY_COST_PER_SEARCH_USD`, `MAX_RETRIES`, `RETRY_BASE_SECONDS`, `CACHE_TTL_SECONDS`
 - **Integrated APIs**: Tavily (search), OpenRouter (chat completions)
 - **Spans per research run**: 3-5 (1 OPERATION research + 1-2 TOOL tavily.search + 1 LLM + optional TOOL reformulate)
 - **Spans per research run (--agentic)**: 2-7 (1 OPERATION research_agentic + N×TOOL tavily.search + N×LLM, where N ≤ max_iter)
-- **Typical cost per query**: $0.0002 (depth=1) to $0.0006 (depth=3)
+- **Typical cost per query**: $0.0002 (depth=1, basic) to $0.0006 (depth=3, basic)
 - **Typical cost --agentic**: $0.0001 to $0.0010 depending on iterations
+- **Tavily cost (advanced depth)**: ~3x basic — $0.003 per search instead of $0.001
+- **OpenAI client timeout**: 30s default, configurable per `ask()` call
