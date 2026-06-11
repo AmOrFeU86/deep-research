@@ -277,6 +277,29 @@ def enforce_citations(text: str, num_sources: int,
     return cleaned, sorted(invalid_set)
 
 
+def _source_metadata(all_results: list[dict],
+                     tavily_searches: int,
+                     tavily_cost_usd: float) -> dict:
+    """Build the metadata dict stored on a research OPERATION span.
+
+    Pairs with the per-call metadata in #8 (`_tavily_metadata`): every
+    tavily.search span has its own query/limit/result-count, and the
+    parent OPERATION span has the deduped source list plus the totals
+    for the whole run. The treval dashboard renders both, so a user
+    clicking a research span can see exactly which sources fed the
+    answer and which queries produced them.
+
+    `all_results` is copied so the caller can keep mutating its own
+    list without surprising the dashboard on a later read.
+    """
+    return {
+        "num_sources": len(all_results),
+        "sources": list(all_results),
+        "tavily_searches": tavily_searches,
+        "tavily_cost_usd": tavily_cost_usd,
+    }
+
+
 def _require_env(var: str) -> str:
     """Read an env var; abort with a clear message if missing."""
     val = os.environ.get(var)
@@ -536,7 +559,9 @@ def _run_research(prompt: str, depth: int = 1,
             print(f"⚠️  Invalid citations in response: {invalid} "
                   f"(only {len(all_results)} sources available)")
 
-        store.update(root_id, output=response)
+        store.update(root_id, output=response,
+                     metadata=_source_metadata(all_results, tavily_searches,
+                                               usage["tavily_cost_usd"]))
         return response, all_results, usage
     finally:
         pop_span()
@@ -588,7 +613,11 @@ def _run_research_streaming(prompt: str, depth: int = 1,
         sources = format_sources(all_results)
         if sources:
             print(f"\n{sources}")
-        store.update(root_id, output=response)
+        tavily_searches = len(queries)
+        tavily_cost = round(tavily_searches * TAVILY_COST_PER_SEARCH_USD, 5)
+        store.update(root_id, output=response,
+                     metadata=_source_metadata(all_results, tavily_searches,
+                                               tavily_cost))
     finally:
         pop_span()
 
@@ -770,7 +799,9 @@ def run_research_agentic(prompt: str, model: str = DEFAULT_MODEL,
         total_usage["tavily_cost_usd"] = round(
             searches_done * TAVILY_COST_PER_SEARCH_USD, 5
         )
-        store.update(root_id, output=answer)
+        store.update(root_id, output=answer,
+                     metadata=_source_metadata(all_results, searches_done,
+                                               total_usage["tavily_cost_usd"]))
         return answer, all_results, total_usage
     finally:
         pop_span()
