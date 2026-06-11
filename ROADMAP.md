@@ -126,6 +126,18 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 - [x] **#23 README.md** with usage examples
 - [~] **#24 Publish on PyPI** as `deep-research` — infra ready, pending upload with your OK
 
+### Evaluation (NEW — quality measurement)
+- [ ] **#27 Eval suite for response quality** — a `tests/eval/` directory of
+  10–20 Q&A pairs with reference answers, runnable as `dr eval` or
+  `pytest tests/eval/ -m eval`. Uses LLM-as-judge (cheap model) to score
+  subjective answers. The whole eval run is traced by treval so you can
+  see cost, latency, and the full span tree per question. Without this,
+  changes to the system prompt, model choice, or `--depth` are blind —
+  you can't tell if a change improved or regressed the answer quality.
+  This is the single highest-leverage addition left: it gates
+  confidence in all other quality work. Gold set is the expensive part;
+  the harness is small.
+
 ---
 
 ## 🟡 Medium priority
@@ -133,6 +145,30 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 ### Depth
 - [x] **#3 `search_depth: "advanced"` from Tavily** (vs "basic") — pricier, more relevant
 - [x] **#4 Parallel search** of sub-questions (ThreadPoolExecutor, manual parent push per thread because treval uses threading.local() — 4x speedup with 4 queries)
+
+### Real deep research (NEW)
+- [ ] **#28 Iterative deep exploration** — the current `--depth N` is
+  breadth, not depth: it reformulates the prompt into N variants and
+  searches all of them. Real "deep" research would: read the top
+  result, follow its citations/links, drill into specifics (e.g.
+  "what is the cost?", "what about edge cases?"), and iterate until
+  the LLM signals it has enough. The `--agentic` ReAct loop touches
+  this but is shallow (max ~3 iterations, no persistent context
+  between iterations). A proper deep mode would distinguish the
+  project name from "another Tavily wrapper". Significant scope —
+  probably its own design doc before implementation.
+
+### Memory (NEW)
+- [ ] **#29 Persistent knowledge base between runs** — every `dr.py`
+  invocation is currently ephemeral: search history, source
+  relevance signals, and follow-up context die with the process. The
+  `--repl` mode has a transient version of this, but it dies when
+  the session ends. A persistent local log (SQLite at
+  `~/.deep-research/notes.db` or append-only markdown) would let a
+  new query use prior runs as context. Changes how the tool is used:
+  from "answer a question" to "build a research notebook over time".
+  Also unlocks eval against historical data (#27) without re-running
+  Tavily every time.
 
 ### Observability
 - [x] **#8 Structured metadata in TOOL span**: query, max_results, num_results
@@ -194,6 +230,9 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 | 8  | Structured metadata in TOOL span | 🟡 medium | 🟢 low | ✅ |
 | 22 | Citation enforcement (regex) | 🟢 high | 🟢 low | ✅ |
 | 9  | Source report in OPERATION span | 🟡 medium | 🟢 low | ✅ |
+| 27 | Eval suite (response quality) | 🟢 high | 🟡 medium | ❌ |
+| 28 | Iterative deep exploration | 🟢 high | 🔴 high | ❌ |
+| 29 | Persistent knowledge base | 🟡 high | 🟡 medium | ❌ |
 
 ---
 
@@ -208,6 +247,21 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 ---
 
 ## 🚀 Suggested next steps (next session)
+
+**The natural next moves** (in priority order):
+
+1. **#27 Eval suite** — start here. Even 5 gold-set questions + a tiny
+   LLM-as-judge harness gives you a regression detector. ~half a day
+   for the harness, the rest is collecting good Q&A pairs.
+2. **#24 PyPI upload** — infra is ready, only needs your explicit OK
+   and a `twine upload` + post-upload verification.
+3. **#25 GitHub Actions** — pytest + ruff on every PR. ~20 min of YAML
+   if you have any PRs in flight; skip if not.
+4. **#29 Persistent knowledge base** — depends on what shape the
+   eval takes. If you go with SQLite for #27, the same store is the
+   natural home for #29.
+5. **#28 Iterative deep exploration** — biggest scope, deserves its
+   own design doc. The existing `--agentic` is the seed.
 
 **Low effort, high impact:**
 - ~~#24b Finish PyPI (`twine upload` + post-upload verification)~~ pending explicit permission
