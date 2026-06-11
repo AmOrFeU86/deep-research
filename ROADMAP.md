@@ -49,6 +49,23 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
   be invisible in worker threads); 4x speedup with 4 queries (8 tests)
 - Tests: **119 unit + 2 integration (121 total, ~2s)**
 
+### Session 6 — Metadata + citation enforcement
+- [x] **#8 Structured metadata in TOOL span** — `_tavily_metadata(args,
+  kwargs, result)` attached to the `@treval.tool` decorator via
+  `metadata_fn=`. Each `tavily.search` span now records `query`,
+  `max_results`, `num_results` in JSON metadata. The treval dashboard
+  renders it in the detail panel — every search is self-describing
+  (6 tests)
+- [x] **#22 Citation enforcement** — `enforce_citations(text,
+  num_sources, strip=False)` runs a regex pass over the LLM output,
+  returns the list of invalid citation numbers, and the CLI prints
+  a `⚠️  Invalid citations` warning. Wired into both `_run_research`
+  and `_run_research_streaming` so the warning fires in non-streaming
+  and streaming modes alike. Detection: single integer (with optional
+  leading minus) inside square brackets; `[v1.0]` and `[ref]` are
+  ignored (12 tests)
+- Tests: **137 unit + 2 integration (139 total, ~12s including 2 integration)**
+
 ---
 
 ### Session 1 — Baseline
@@ -104,13 +121,13 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 - [x] **#4 Parallel search** of sub-questions (ThreadPoolExecutor, manual parent push per thread because treval uses threading.local() — 4x speedup with 4 queries)
 
 ### Observability
-- [ ] **#8 Structured metadata in TOOL span**: query, max_results, num_results
+- [x] **#8 Structured metadata in TOOL span**: query, max_results, num_results
 - [ ] **#9 Source report** as structured span input/output
 
 ### CLI UX
 - [x] **#10 Flag `--model`**
 - [x] **#11 Flag `--max-results N`**
-- [ ] **#12 Interactive mode / REPL**: keep context between questions
+- [x] **#12 Interactive mode / REPL**: keep context between questions
 - [x] **#14 Streaming**
 
 ### Robustness
@@ -119,8 +136,8 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 - [x] **#18 Configurable timeout** (30s default, disable with `None`)
 
 ### Response quality
-- [ ] **#20 Cross-verification**: a second LLM pass to verify citations
-- [ ] **#22 Citation enforcement** + post-processing (URL regex)
+- [x] **#20 Cross-verification**: a second LLM pass to verify citations
+- [x] **#22 Citation enforcement** + post-processing (URL regex)
 
 ### Distribution
 - [ ] **#25 GitHub Actions**: pytest + ruff on every PR
@@ -157,6 +174,11 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 | 18 | Configurable timeout | 🟡 medium | 🟢 low | ✅ |
 | 26 | Pre-commit hook | 🟡 medium | 🟢 low | ✅ |
 | 3  | Tavily `search_depth: "advanced"` | 🟡 medium | 🟢 low | ✅ |
+| 4  | Parallel search (asyncio/threads) | 🟡 medium | 🟡 medium | ✅ |
+| 12 | Interactive REPL | 🟡 medium | 🟡 medium | ✅ |
+| 20 | Cross-verification (2nd LLM pass) | 🟡 medium | 🟡 medium | ✅ |
+| 8  | Structured metadata in TOOL span | 🟡 medium | 🟢 low | ✅ |
+| 22 | Citation enforcement (regex) | 🟢 high | 🟢 low | ✅ |
 
 ---
 
@@ -177,11 +199,12 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 
 **Advanced robustness:**
 - ~~#18 Configurable timeout in OpenAI client~~ ✅ done
-- **#8** Structured metadata in spans (for post-mortem queries)
+- ~~#8 Structured metadata in spans (for post-mortem queries)~~ ✅ done
+- ~~#20 Cross-verification (a second LLM pass)~~ ✅ done
+- ~~#22 Citation enforcement (regex)~~ ✅ done
 
 **Product features:**
-- **#12** Interactive REPL (keeps context between questions)
-- **#20** Cross-verification (a second LLM pass)
+- ~~#12 Interactive REPL (keeps context between questions)~~ ✅ done
 
 **Distribution:**
 - **#25** GitHub Actions with pytest + ruff
@@ -190,10 +213,10 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 
 ## 📊 Project metrics (at session close)
 
-- **Tests**: 119 unit + 2 integration (121 total)
-- **Suite time**: ~8 seconds (includes 2 integration tests with real API)
+- **Tests**: 137 unit + 2 integration (139 total)
+- **Suite time**: ~12 seconds (includes 2 integration tests with real API)
 - **CLI flags**: 9 (`--report`, `--depth`, `--max-results`, `--model`, `--stream`, `--agentic`, `--repl`, `--verify`, prompt)
-- **Public functions**: `search`, `search_cached`, `_search_with_parent`, `parallel_search`, `ask`, `format_context`, `format_sources`, `reformulate`, `estimate_cost`, `parse_action`, `verify_citations`, `run_research_agentic`, `run_repl`, `main`
+- **Public functions**: `search`, `search_cached`, `_tavily_metadata`, `_search_with_parent`, `parallel_search`, `ask`, `format_context`, `format_sources`, `reformulate`, `estimate_cost`, `parse_action`, `verify_citations`, `enforce_citations`, `run_research_agentic`, `run_repl`, `main`
 - **Public constants**: `DEFAULT_MODEL`, `DEFAULT_FALLBACK`, `DEFAULT_MAX_RESULTS`, `DEFAULT_TEMPERATURE`, `DEFAULT_TIMEOUT_SECONDS`, `DEFAULT_SEARCH_DEPTH`, `TAVILY_COST_PER_SEARCH_USD`, `MAX_RETRIES`, `RETRY_BASE_SECONDS`, `CACHE_TTL_SECONDS`
 - **Integrated APIs**: Tavily (search), OpenRouter (chat completions)
 - **Spans per research run**: 3-5 (1 OPERATION research + 1-2 TOOL tavily.search + 1 LLM + optional TOOL reformulate)
