@@ -66,6 +66,20 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
   ignored (12 tests)
 - Tests: **137 unit + 2 integration (139 total, ~12s including 2 integration)**
 
+### Session 7 — Source report in OPERATION span
+- [x] **#9 Source report as structured span metadata** —
+  `_source_metadata(all_results, tavily_searches, tavily_cost_usd)`
+  builds a dict with `num_sources`, the full deduped `sources`
+  list (url/title/content), plus `tavily_searches` and
+  `tavily_cost_usd`. Wired into all three research paths
+  (`_run_research`, `_run_research_streaming`, `run_research_agentic`)
+  via `store.update(root_id, metadata=...)`. Pair with #8: every
+  Tavily call has per-call metadata (#8) and the parent OPERATION
+  span has the full run's totals + sources (#9). Required a one-line
+  fix in treval's `SpanStore.update()` to JSON-encode metadata
+  (separate commit in treval repo)
+- Tests: **144 unit + 2 integration (146 total)**
+
 ---
 
 ### Session 1 — Baseline
@@ -122,7 +136,7 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 
 ### Observability
 - [x] **#8 Structured metadata in TOOL span**: query, max_results, num_results
-- [ ] **#9 Source report** as structured span input/output
+- [x] **#9 Source report** as structured span input/output
 
 ### CLI UX
 - [x] **#10 Flag `--model`**
@@ -179,6 +193,7 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 | 20 | Cross-verification (2nd LLM pass) | 🟡 medium | 🟡 medium | ✅ |
 | 8  | Structured metadata in TOOL span | 🟡 medium | 🟢 low | ✅ |
 | 22 | Citation enforcement (regex) | 🟢 high | 🟢 low | ✅ |
+| 9  | Source report in OPERATION span | 🟡 medium | 🟢 low | ✅ |
 
 ---
 
@@ -202,6 +217,7 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 - ~~#8 Structured metadata in spans (for post-mortem queries)~~ ✅ done
 - ~~#20 Cross-verification (a second LLM pass)~~ ✅ done
 - ~~#22 Citation enforcement (regex)~~ ✅ done
+- ~~#9 Source report as structured span metadata~~ ✅ done
 
 **Product features:**
 - ~~#12 Interactive REPL (keeps context between questions)~~ ✅ done
@@ -213,10 +229,10 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 
 ## 📊 Project metrics (at session close)
 
-- **Tests**: 137 unit + 2 integration (139 total)
-- **Suite time**: ~12 seconds (includes 2 integration tests with real API)
+- **Tests**: 144 unit + 2 integration (146 total)
+- **Suite time**: ~20 seconds (includes 2 integration tests with real API)
 - **CLI flags**: 9 (`--report`, `--depth`, `--max-results`, `--model`, `--stream`, `--agentic`, `--repl`, `--verify`, prompt)
-- **Public functions**: `search`, `search_cached`, `_tavily_metadata`, `_search_with_parent`, `parallel_search`, `ask`, `format_context`, `format_sources`, `reformulate`, `estimate_cost`, `parse_action`, `verify_citations`, `enforce_citations`, `run_research_agentic`, `run_repl`, `main`
+- **Public functions**: `search`, `search_cached`, `_tavily_metadata`, `_search_with_parent`, `parallel_search`, `ask`, `format_context`, `format_sources`, `enforce_citations`, `_source_metadata`, `reformulate`, `estimate_cost`, `parse_action`, `verify_citations`, `run_research_agentic`, `run_repl`, `main`
 - **Public constants**: `DEFAULT_MODEL`, `DEFAULT_FALLBACK`, `DEFAULT_MAX_RESULTS`, `DEFAULT_TEMPERATURE`, `DEFAULT_TIMEOUT_SECONDS`, `DEFAULT_SEARCH_DEPTH`, `TAVILY_COST_PER_SEARCH_USD`, `MAX_RETRIES`, `RETRY_BASE_SECONDS`, `CACHE_TTL_SECONDS`
 - **Integrated APIs**: Tavily (search), OpenRouter (chat completions)
 - **Spans per research run**: 3-5 (1 OPERATION research + 1-2 TOOL tavily.search + 1 LLM + optional TOOL reformulate)
