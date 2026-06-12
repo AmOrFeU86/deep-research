@@ -542,11 +542,39 @@ def reformulate(prompt: str, n: int, model: str = DEFAULT_MODEL) -> list[str]:
     return variants[:n]
 
 
+def _print_sources(results: list[dict]) -> None:
+    """Print the raw snippet content of every Tavily result.
+
+    Used by the --show-snippets CLI flag as a debugging tool: when an
+    answer looks suspicious (e.g. mentions a model that doesn't exist),
+    this lets you see exactly what the LLM had to work with — separating
+    'Tavily returned weak sources' from 'LLM hallucinated on top of
+    good sources'.
+    """
+    if not results:
+        return
+    print(f"\n{'─' * 78}")
+    print(f"  📄 SOURCES ({len(results)} results, --show-snippets)")
+    print(f"{'─' * 78}")
+    for i, r in enumerate(results, 1):
+        title = r.get("title", "(no title)")
+        url = r.get("url", "")
+        content = r.get("content", "")
+        print(f"  [{i}] {title}")
+        print(f"      URL: {url}")
+        # Indent multi-line content; truncate very long snippets for readability
+        snippet = content[:600] + ("…" if len(content) > 600 else "")
+        for line in snippet.splitlines() or [snippet]:
+            print(f"      │ {line}")
+    print(f"{'─' * 78}\n")
+
+
 def _run_research(prompt: str, depth: int = 1,
                   max_results: int = DEFAULT_MAX_RESULTS,
                   model: str = DEFAULT_MODEL,
                   fallback: str | None = None,
-                  context: str | None = None) -> tuple[str, list[dict], dict]:
+                  context: str | None = None,
+                  show_snippets: bool = False) -> tuple[str, list[dict], dict]:
     """Run a full research task wrapped in a parent OPERATION span.
 
     With depth=1: 1 search of the original query.
@@ -584,6 +612,8 @@ def _run_research(prompt: str, depth: int = 1,
         # Multi-search with dedup by URL (parallel when depth>1)
         all_results = parallel_search(queries, max_results=max_results,
                                       parent_id=root_id)
+        if show_snippets:
+            _print_sources(all_results)
 
         # Combine REPL history (if any) with the search results before asking.
         search_ctx = format_context(all_results)
@@ -614,7 +644,8 @@ def _run_research(prompt: str, depth: int = 1,
 def _run_research_streaming(prompt: str, depth: int = 1,
                             max_results: int = DEFAULT_MAX_RESULTS,
                             model: str = DEFAULT_MODEL,
-                            fallback: str | None = None) -> None:
+                            fallback: str | None = None,
+                            show_snippets: bool = False) -> None:
     """Same as _run_research but prints the LLM response as it streams in."""
     from treval.context import pop_span, push_span
     from treval.db import SpanStore
@@ -637,6 +668,8 @@ def _run_research_streaming(prompt: str, depth: int = 1,
 
         all_results = parallel_search(queries, max_results=max_results,
                                       parent_id=root_id)
+        if show_snippets:
+            _print_sources(all_results)
 
         # Stream the response, printing tokens as they arrive
         full_response = []
@@ -765,7 +798,8 @@ def verify_citations(draft: str, sources: list[dict],
 def run_research_agentic(prompt: str, model: str = DEFAULT_MODEL,
                          fallback: str | None = None,
                          max_iterations: int = 3,
-                         max_results: int = DEFAULT_MAX_RESULTS
+                         max_results: int = DEFAULT_MAX_RESULTS,
+                         show_snippets: bool = False,
                          ) -> tuple[str, list[dict], dict]:
     """ReAct-style research loop where the LLM decides when to stop searching.
 
@@ -837,6 +871,8 @@ def run_research_agentic(prompt: str, model: str = DEFAULT_MODEL,
                                 f"time-sensitive question, query: "
                                 f"\"{prompt}\"):\n{format_context([r])}"
                             )
+                    if show_snippets:
+                        _print_sources(all_results)
                     searches_done += 1
                     continue
                 break
@@ -851,6 +887,8 @@ def run_research_agentic(prompt: str, model: str = DEFAULT_MODEL,
                             f"Observation {i+1} (query: \"{query}\"):\n"
                             f"{format_context([r])}"
                         )
+                if show_snippets:
+                    _print_sources(all_results)
                 searches_done += 1
                 continue
 
@@ -1269,6 +1307,9 @@ def main(args: list[str] | None = None) -> None:
     gen_report = "--report" in args
     args = [a for a in args if a != "--report"]
 
+    show_snippets = "--show-snippets" in args
+    args = [a for a in args if a != "--show-snippets"]
+
     stream = "--stream" in args
     args = [a for a in args if a != "--stream"]
 
@@ -1315,11 +1356,13 @@ def main(args: list[str] | None = None) -> None:
     print(f"\n🔍 Searching the web for: {prompt} (depth={depth}{', agentic' if agentic else ''})")
     if stream:
         _run_research_streaming(prompt, depth=depth, max_results=max_results,
-                                 model=model, fallback=DEFAULT_FALLBACK)
+                                 model=model, fallback=DEFAULT_FALLBACK,
+                                 show_snippets=show_snippets)
     elif agentic:
         response, results, usage = run_research_agentic(prompt, model=model,
                                                          fallback=DEFAULT_FALLBACK,
-                                                         max_iterations=depth + 2)
+                                                         max_iterations=depth + 2,
+                                                         show_snippets=show_snippets)
         print(response)
         print(f"\n{'─' * 40}")
         if usage.get("total_tokens"):
@@ -1337,7 +1380,8 @@ def main(args: list[str] | None = None) -> None:
         response, results, usage = _run_research(prompt, depth=depth,
                                                    max_results=max_results,
                                                    model=model,
-                                                   fallback=DEFAULT_FALLBACK)
+                                                   fallback=DEFAULT_FALLBACK,
+                                                   show_snippets=show_snippets)
         print(response)
         if verify and results:
             print(f"\n🔎 Verifying citations...")
