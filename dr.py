@@ -38,6 +38,11 @@ CACHE_TTL_SECONDS = 24 * 60 * 60  # 24 hours
 # Used to surface true cost of a research run (LLM + search), not just LLM.
 TAVILY_COST_PER_SEARCH_USD = 0.001
 
+# Eval suite — bundled gold set lives next to the eval tests
+DEFAULT_GOLD_PATH = Path(__file__).parent / "tests" / "eval" / "gold.jsonl"
+DEFAULT_JUDGE_MODEL = "deepseek/deepseek-v4-flash"  # cheap LLM-as-judge
+DEFAULT_PASS_THRESHOLD = 0.7  # score >= threshold counts as a pass
+
 # Simple pricing per 1K tokens (USD) — updated manually or via treval prices
 MODEL_PRICES = {
     "deepseek/deepseek-v4-flash": {"input": 0.0001, "output": 0.0004},
@@ -919,9 +924,291 @@ def run_repl(args: list[str], input_func=None) -> None:
         history.append((question, response))
 
 
+# ---------------------------------------------------------------------------
+# Eval suite (#27) — load gold set, judge answers, run the suite, CLI dispatch
+# ---------------------------------------------------------------------------
+
+_REQUIRED_GOLD_FIELDS = ("id", "question", "reference", "criteria")
+
+
+def load_gold_set(path: str | Path | None = None) -> list[dict]:
+    """Read a JSONL file of gold entries and return them as a list of dicts.
+
+    Each entry must have: id, question, reference, criteria. The bundled
+    gold set lives at tests/eval/gold.jsonl (DEFAULT_GOLD_PATH) and is
+    loaded when `path` is None.
+
+    Blank lines are ignored. Malformed JSON or missing fields raise a
+    clear error (we want to fail loud on a broken gold set — silent
+    skipping would let a typo in the gold file corrupt the eval).
+    """
+    p = Path(path) if path is not None else DEFAULT_GOLD_PATH
+    entries: list[dict] = []
+    with open(p, "r", encoding="utf-8") as f:
+        for lineno, line in enumerate(f, 1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            entry = json.loads(stripped)  # raises JSONDecodeError on garbage
+            missing = [k for k in _REQUIRED_GOLD_FIELDS if k not in entry]
+            if missing:
+                raise ValueError(
+                    f"{p}:{lineno} entry is missing required field(s): {missing}"
+                )
+            entries.append(entry)
+    return entries
+
+
+def _extract_json_block(text: str) -> str | None:
+    """Return the first {...} block in `text`, or None if not found.
+
+    Handles JSON embedded in markdown code fences or surrounding prose.
+    Used as a fallback when json.loads(text) fails.
+    """
+    import re
+    # Try to find a JSON block. Use a non-greedy match for the first {...}
+    # (greedy matches would swallow across multiple top-level objects, but
+    # in practice the judge returns exactly one).
+    match = re.search(r"\{.*?\}", text, re.DOTALL)
+    if not match:
+        return None
+    return match.group(0)
+
+
+def parse_judge_json(text: str) -> tuple[float, str]:
+    """Parse the LLM judge's response into a (score, reason) tuple.
+
+    Tolerates markdown code fences and surrounding prose. Clamps the
+    score to [0.0, 1.0]. Raises ValueError on unparseable output or if
+    the score field is missing — we want a loud failure if the judge
+    is broken, not a silent zero that masks the bug.
+    """
+    if not text or not text.strip():
+        raise ValueError("judge returned empty output")
+
+    # Strategy 1: direct json.loads
+    parsed = None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        # Strategy 2: extract first {...} block (handles markdown + prose)
+        block = _extract_json_block(text)
+        if block is not None:
+            try:
+                parsed = json.loads(block)
+            except json.JSONDecodeError:
+                pass
+
+    if parsed is None or not isinstance(parsed, dict):
+        raise ValueError(f"judge returned no parseable JSON object: {text!r}")
+
+    if "score" not in parsed:
+        raise ValueError(f"judge output missing 'score' field: {parsed!r}")
+
+    try:
+        score = float(parsed["score"])
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"judge score is not numeric: {parsed.get('score')!r}") from e
+
+    score = max(0.0, min(1.0, score))  # clamp to [0, 1]
+    reason = str(parsed.get("reason", ""))
+    return score, reason
+
+
+JUDGE_SYSTEM_PROMPT = (
+    "You are an impartial evaluator. You will receive a question, a "
+    "reference answer, the model's answer, and a checklist of criteria. "
+    "Decide how well the model's answer satisfies the criteria, using the "
+    "reference answer as ground truth. Return ONLY a JSON object of the "
+    "form {\"score\": <0.0-1.0>, \"reason\": \"<one-sentence rationale>\"}."
+)
+
+
+def judge_answer(question: str, reference: str, answer: str,
+                 criteria: list[str], model: str, judge_model: str
+                 ) -> tuple[float, str]:
+    """Use a cheap LLM to score `answer` against `reference` and `criteria`.
+
+    The judge LLM is `judge_model` (default: flash — cheap). `model` is
+    the model that produced `answer`, recorded for traceability but not
+    used by the judge.
+
+    Returns (score, reason). Raises ValueError if the judge returns
+    output that parse_judge_json cannot handle.
+    """
+    criteria_block = "\n".join(f"- {c}" for c in criteria)
+    user_prompt = (
+        f"Question:\n{question}\n\n"
+        f"Reference answer:\n{reference}\n\n"
+        f"Model's answer to grade:\n{answer}\n\n"
+        f"Criteria (checklist):\n{criteria_block}\n\n"
+        f"Return {{\"score\": <0.0-1.0>, \"reason\": \"<why>\"}}."
+    )
+    text, _usage = ask(
+        prompt=user_prompt, model=judge_model, system=JUDGE_SYSTEM_PROMPT,
+    )
+    return parse_judge_json(text)
+
+
+def _run_eval(gold_path: str | Path | None = None,
+              research_model: str = DEFAULT_MODEL,
+              judge_model: str = DEFAULT_JUDGE_MODEL,
+              threshold: float = DEFAULT_PASS_THRESHOLD,
+              depth: int = 1) -> dict:
+    """Run the eval suite: for every gold entry, research + judge + record.
+
+    Returns a dict with aggregate stats (`mean_score`, `pass_rate`,
+    `num_passed`, `num_failed`, `threshold`, `total_cost_usd`,
+    `num_questions`) and per-question details in `results`. Each
+    result has id, question, answer, score, reason, passed, cost_usd,
+    duration_ms.
+
+    Tracing: each question runs inside its own OPERATION span
+    `eval.question.<id>` so the treval dashboard shows a clean tree
+    (one span per question, with the research + judge as children).
+    """
+    from treval.context import pop_span, push_span
+    from treval.db import SpanStore
+
+    gold = load_gold_set(gold_path)
+    results: list[dict] = []
+    total_cost = 0.0
+    store = SpanStore()
+
+    for entry in gold:
+        # Per-question span: makes the eval legible in the treval dashboard
+        q_span_id = store.save(
+            name=f"eval.question.{entry['id']}",
+            type="OPERATION",
+            status="ok",
+            input=entry["question"],
+        )
+        push_span(q_span_id)
+        start = time.perf_counter()
+        try:
+            response, _results, research_usage = _run_research(
+                entry["question"], depth=depth, max_results=DEFAULT_MAX_RESULTS,
+                model=research_model,
+            )
+            score, reason = judge_answer(
+                question=entry["question"],
+                reference=entry["reference"],
+                answer=response,
+                criteria=entry["criteria"],
+                model=research_model,
+                judge_model=judge_model,
+            )
+            duration_ms = (time.perf_counter() - start) * 1000
+            cost = research_usage.get("cost_usd", 0.0)
+            total_cost += cost
+            passed = score >= threshold
+            result = {
+                "id": entry["id"],
+                "question": entry["question"],
+                "answer": response,
+                "score": score,
+                "reason": reason,
+                "passed": passed,
+                "cost_usd": cost,
+                "duration_ms": duration_ms,
+            }
+            results.append(result)
+            # Tag the span with the eval outcome — queryable from the dashboard
+            store.update(q_span_id, output=response,
+                         metadata={"id": entry["id"], "score": score,
+                                   "passed": passed, "reason": reason})
+        finally:
+            pop_span()
+
+    n = len(results)
+    scores = [r["score"] for r in results]
+    num_passed = sum(1 for r in results if r["passed"])
+    return {
+        "num_questions": n,
+        "mean_score": (sum(scores) / n) if n else 0.0,
+        "pass_rate": (num_passed / n) if n else 0.0,
+        "num_passed": num_passed,
+        "num_failed": n - num_passed,
+        "threshold": threshold,
+        "total_cost_usd": total_cost,
+        "results": results,
+    }
+
+
+def _print_eval_report(report: dict) -> None:
+    """Print the eval report in a clean human-readable table.
+
+    Per-question rows show id, score, pass/fail, and the judge's reason.
+    The summary block shows mean score, pass rate, threshold, total cost.
+    """
+    print(f"\n{'─' * 78}")
+    print(f"  EVAL REPORT  ({report['num_questions']} questions, "
+          f"threshold {report['threshold']:.2f})")
+    print(f"{'─' * 78}")
+    print(f"  {'id':<25} {'score':>6}  {'result':<8}  reason")
+    print(f"  {'─' * 25} {'─' * 6}  {'─' * 8}  {'─' * 30}")
+    for r in report["results"]:
+        marker = "✅ PASS" if r["passed"] else "❌ FAIL"
+        reason = (r["reason"] or "")[:60]
+        print(f"  {r['id']:<25} {r['score']:>6.2f}  {marker:<8}  {reason}")
+    print(f"{'─' * 78}")
+    print(f"  mean score : {report['mean_score']:.3f}")
+    print(f"  pass rate  : {report['num_passed']}/{report['num_questions']} "
+          f"({report['pass_rate'] * 100:.0f}%)")
+    print(f"  total cost : ${report['total_cost_usd']:.5f}")
+    print(f"{'─' * 78}\n")
+
+
+def _run_eval_cli(args: list[str]) -> None:
+    """Parse `dr eval ...` flags and dispatch to _run_eval.
+
+    Flags:
+      --gold PATH             path to gold.jsonl (default: bundled)
+      --judge-model MODEL     LLM used as judge (default: flash)
+      --research-model MODEL  LLM used for research (default: DEFAULT_MODEL)
+      --threshold FLOAT       pass threshold in [0, 1] (default: 0.7)
+    """
+    gold_path: str | None = None
+    judge_model = DEFAULT_JUDGE_MODEL
+    research_model = DEFAULT_MODEL
+    threshold = DEFAULT_PASS_THRESHOLD
+
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--gold" and i + 1 < len(args):
+            gold_path = args[i + 1]; i += 2
+        elif a == "--judge-model" and i + 1 < len(args):
+            judge_model = args[i + 1]; i += 2
+        elif a == "--research-model" and i + 1 < len(args):
+            research_model = args[i + 1]; i += 2
+        elif a == "--threshold" and i + 1 < len(args):
+            threshold = float(args[i + 1]); i += 2
+        else:
+            print(f"Unknown flag for `dr eval`: {a}")
+            sys.exit(2)
+
+    report = _run_eval(
+        gold_path=gold_path, research_model=research_model,
+        judge_model=judge_model, threshold=threshold,
+    )
+    _print_eval_report(report)
+
+    # CI mode: if pass rate is below threshold, exit non-zero so CI can fail.
+    if report["pass_rate"] < threshold:
+        print(f"  ✗ Pass rate {report['pass_rate'] * 100:.0f}% is below "
+              f"threshold {threshold * 100:.0f}%. Exit 1.")
+        sys.exit(1)
+
+
 def main(args: list[str] | None = None) -> None:
     if args is None:
         args = sys.argv[1:]
+
+    # --- Subcommands (no API keys required up-front; needed only when run) ---
+    if args and args[0] == "eval":
+        _run_eval_cli(args[1:])
+        return
 
     _require_env(API_KEY_ENV)
     _require_env(TAVILY_KEY_ENV)
