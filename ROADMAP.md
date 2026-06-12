@@ -80,6 +80,29 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
   (separate commit in treval repo)
 - Tests: **144 unit + 2 integration (146 total)**
 
+### Session 8 — Eval suite (#27)
+- [x] **#27 Eval suite for response quality** — LLM-as-judge harness
+  with a bundled gold set. New functions: `load_gold_set()`
+  (JSONL loader, validates required fields, fails loud on broken
+  gold), `parse_judge_json()` (tolerant parser: pure JSON, markdown
+  fences, surrounding prose, score clamping, raises on garbage),
+  `judge_answer()` (builds prompt with question + reference +
+  criteria, calls `ask()` with the cheap flash judge model, parses
+  response), `_run_eval()` (orchestrator — for each gold entry
+  runs `_run_research` then `judge_answer`, records id/score/
+  reason/cost/duration, wraps each question in its own OPERATION
+  span `eval.question.<id>` with `{id, score, passed, reason}`
+  metadata for the treval dashboard). CLI: `dr eval` subcommand
+  with `--gold /path`, `--judge-model`, `--research-model`,
+  `--threshold` flags; prints a per-question table + summary
+  (mean score, pass rate, total cost); exit 1 when pass_rate <
+  threshold (CI-friendly). Gold set: 10 questions at
+  `tests/eval/gold.jsonl` — 3 factual simple, 2 multi-hecho,
+  2 comparativa, 2 explicativa, 1 técnica Python (GIL).
+  Stable over time, no current-events. Integration test on real
+  APIs: 10/10 PASS, mean 0.947, $0.00195 total, ~30s
+- Tests: **194 unit + 2 integration (196 total)**
+
 ---
 
 ### Session 1 — Baseline
@@ -127,7 +150,7 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 - [~] **#24 Publish on PyPI** as `deep-research` — infra ready, pending upload with your OK
 
 ### Evaluation (NEW — quality measurement)
-- [ ] **#27 Eval suite for response quality** — a `tests/eval/` directory of
+- [x] **#27 Eval suite for response quality** — a `tests/eval/` directory of
   10–20 Q&A pairs with reference answers, runnable as `dr eval` or
   `pytest tests/eval/ -m eval`. Uses LLM-as-judge (cheap model) to score
   subjective answers. The whole eval run is traced by treval so you can
@@ -230,7 +253,7 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 | 8  | Structured metadata in TOOL span | 🟡 medium | 🟢 low | ✅ |
 | 22 | Citation enforcement (regex) | 🟢 high | 🟢 low | ✅ |
 | 9  | Source report in OPERATION span | 🟡 medium | 🟢 low | ✅ |
-| 27 | Eval suite (response quality) | 🟢 high | 🟡 medium | ❌ |
+| 27 | Eval suite (response quality) | 🟢 high | 🟡 medium | ✅ |
 | 28 | Iterative deep exploration | 🟢 high | 🔴 high | ❌ |
 | 29 | Persistent knowledge base | 🟡 high | 🟡 medium | ❌ |
 
@@ -250,21 +273,19 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 
 **The natural next moves** (in priority order):
 
-1. **#27 Eval suite** — start here. Even 5 gold-set questions + a tiny
-   LLM-as-judge harness gives you a regression detector. ~half a day
-   for the harness, the rest is collecting good Q&A pairs.
-2. **#24 PyPI upload** — infra is ready, only needs your explicit OK
+1. **#24 PyPI upload** — infra is ready, only needs your explicit OK
    and a `twine upload` + post-upload verification.
-3. **#25 GitHub Actions** — pytest + ruff on every PR. ~20 min of YAML
+2. **#25 GitHub Actions** — pytest + ruff on every PR. ~20 min of YAML
    if you have any PRs in flight; skip if not.
-4. **#29 Persistent knowledge base** — depends on what shape the
-   eval takes. If you go with SQLite for #27, the same store is the
-   natural home for #29.
-5. **#28 Iterative deep exploration** — biggest scope, deserves its
+3. **#29 Persistent knowledge base** — depends on what shape the
+   eval takes. With #27 done, you can now run `dr eval` as a
+   regression detector before/after changes to #29.
+4. **#28 Iterative deep exploration** — biggest scope, deserves its
    own design doc. The existing `--agentic` is the seed.
 
 **Low effort, high impact:**
 - ~~#24b Finish PyPI (`twine upload` + post-upload verification)~~ pending explicit permission
+- ~~#27 Eval suite~~ ✅ done (10 Q&A starter, harness ready, dr eval CLI, traces)
 
 **Advanced robustness:**
 - ~~#18 Configurable timeout in OpenAI client~~ ✅ done
@@ -283,15 +304,19 @@ Ideas gathered across sessions of 2026-06-11. Grouped by category and prioritize
 
 ## 📊 Project metrics (at session close)
 
-- **Tests**: 144 unit + 2 integration (146 total)
+- **Tests**: 194 unit + 2 integration (196 total)
 - **Suite time**: ~20 seconds (includes 2 integration tests with real API)
 - **CLI flags**: 9 (`--report`, `--depth`, `--max-results`, `--model`, `--stream`, `--agentic`, `--repl`, `--verify`, prompt)
-- **Public functions**: `search`, `search_cached`, `_tavily_metadata`, `_search_with_parent`, `parallel_search`, `ask`, `format_context`, `format_sources`, `enforce_citations`, `_source_metadata`, `reformulate`, `estimate_cost`, `parse_action`, `verify_citations`, `run_research_agentic`, `run_repl`, `main`
-- **Public constants**: `DEFAULT_MODEL`, `DEFAULT_FALLBACK`, `DEFAULT_MAX_RESULTS`, `DEFAULT_TEMPERATURE`, `DEFAULT_TIMEOUT_SECONDS`, `DEFAULT_SEARCH_DEPTH`, `TAVILY_COST_PER_SEARCH_USD`, `MAX_RETRIES`, `RETRY_BASE_SECONDS`, `CACHE_TTL_SECONDS`
+- **Subcommands**: 1 (`dr eval` with `--gold`, `--judge-model`, `--research-model`, `--threshold`)
+- **Public functions**: `search`, `search_cached`, `_tavily_metadata`, `_search_with_parent`, `parallel_search`, `ask`, `format_context`, `format_sources`, `enforce_citations`, `_source_metadata`, `reformulate`, `estimate_cost`, `parse_action`, `verify_citations`, `run_research_agentic`, `run_repl`, `load_gold_set`, `parse_judge_json`, `judge_answer`, `_run_eval`, `_print_eval_report`, `main`
+- **Public constants**: `DEFAULT_MODEL`, `DEFAULT_FALLBACK`, `DEFAULT_MAX_RESULTS`, `DEFAULT_TEMPERATURE`, `DEFAULT_TIMEOUT_SECONDS`, `DEFAULT_SEARCH_DEPTH`, `DEFAULT_GOLD_PATH`, `DEFAULT_JUDGE_MODEL`, `DEFAULT_PASS_THRESHOLD`, `TAVILY_COST_PER_SEARCH_USD`, `MAX_RETRIES`, `RETRY_BASE_SECONDS`, `CACHE_TTL_SECONDS`
 - **Integrated APIs**: Tavily (search), OpenRouter (chat completions)
 - **Spans per research run**: 3-5 (1 OPERATION research + 1-2 TOOL tavily.search + 1 LLM + optional TOOL reformulate)
 - **Spans per research run (--agentic)**: 2-7 (1 OPERATION research_agentic + N×TOOL tavily.search + N×LLM, where N ≤ max_iter)
+- **Spans per eval run (10 Q)**: ~30-50 (10 OPERATION eval.question + 10 OPERATION research + ~20 LLM + ~10 TOOL)
 - **Typical cost per query**: $0.0002 (depth=1, basic) to $0.0006 (depth=3, basic)
 - **Typical cost --agentic**: $0.0001 to $0.0010 depending on iterations
+- **Typical cost --eval (10 Q)**: ~$0.002 with flash judge, ~$0.02 with pro judge
 - **Tavily cost (advanced depth)**: ~3x basic — $0.003 per search instead of $0.001
 - **OpenAI client timeout**: 30s default, configurable per `ask()` call
+- **Eval baseline (real APIs, 10 Q, flash)**: mean 0.947, 10/10 PASS, $0.00195
