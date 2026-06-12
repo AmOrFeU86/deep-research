@@ -341,8 +341,42 @@ AGENTIC_SYSTEM_PROMPT = (
     "a JSON object in one of these two formats:\n"
     '  - To request a web search: {"action": "search", "query": "your query"}\n'
     '  - To give the final answer: {"action": "answer", "answer": "your answer"}\n'
-    "Respond ONLY with the JSON, no extra text or markdown."
+    "Respond ONLY with the JSON, no extra text or markdown.\n\n"
+    "IMPORTANT: If you are uncertain (e.g. the question is about events "
+    "after your training cutoff, or asks for sources you don't remember "
+    "exactly), you MUST request a search. Never answer with 'I cannot', "
+    "'my knowledge cutoff', or 'I don't have information' — instead, "
+    "request a search so the user gets a real, sourced answer."
 )
+
+
+# Refusal patterns the LLM uses to dodge time-sensitive questions. When
+# detected on the first iteration of run_research_agentic, we force a
+# Tavily search with the original prompt and re-prompt with the results
+# — the LLM almost always returns a real answer on iter 2 once it has
+# search context. This is the safety net for "I cannot" responses that
+# would otherwise leave the user with no information.
+_REFUSAL_PATTERNS = (
+    "knowledge cutoff", "as of my", "as an ai", "as a language model",
+    "i cannot", "i can't", "i don't have", "i do not have",
+    "i'm unable", "i am unable", "training data", "training cutoff",
+    "my knowledge", "no information", "i cannot provide",
+    "i'm not able", "i am not able", "future events",
+    "i don't know", "i do not know", "do not have access",
+)
+
+
+def _looks_like_refusal(text: str) -> bool:
+    """Detect when an LLM 'answer' is actually a refusal/uncertainty
+    statement, not a substantive answer to the user's question.
+
+    Used by run_research_agentic to decide whether to force a search
+    when the LLM tries to exit the loop with a non-answer.
+    """
+    if not text:
+        return False
+    lower = text.lower()
+    return any(pat in lower for pat in _REFUSAL_PATTERNS)
 
 VERIFY_SYSTEM_PROMPT = (
     "You are a citation verifier. You receive a draft answer and a list of "
@@ -786,6 +820,25 @@ def run_research_agentic(prompt: str, model: str = DEFAULT_MODEL,
 
             if action.get("action") == "answer":
                 answer = action.get("answer", "")
+                # Refusal safety net: if the LLM tries to exit the loop on
+                # iter 0 with a refusal-style answer (cutoff, "I cannot",
+                # etc.) and no search has been done yet, force a search
+                # with the original prompt and re-prompt with the
+                # observations. The LLM almost always returns a real,
+                # sourced answer on iter 2 once it has search context.
+                if (i == 0 and searches_done == 0
+                        and _looks_like_refusal(answer)):
+                    for r in search_cached(prompt, max_results=max_results):
+                        if r["url"] not in seen_urls:
+                            seen_urls.add(r["url"])
+                            all_results.append(r)
+                            observations.append(
+                                f"Observation 1 (forced search for "
+                                f"time-sensitive question, query: "
+                                f"\"{prompt}\"):\n{format_context([r])}"
+                            )
+                    searches_done += 1
+                    continue
                 break
 
             if action.get("action") == "search":
