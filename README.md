@@ -102,6 +102,116 @@ The following are now hardcoded at the top of `dr.py` to keep the eval signal cl
 | `DEFAULT_SEARCH_DEPTH` | `"basic"` | Tavily `basic` (cheap) vs `advanced` (3x, deeper) |
 | `SELF_CRITIQUE` | `True` | Re-prompt if verifier finds citation issues |
 
+## Calling dr from another agent
+
+`dr` is designed to be invoked as a subprocess by other agents (CI runners,
+automation scripts, sub-agents in multi-agent systems). Three things make
+it agent-friendly:
+
+1. **Discoverable** — `dr --help` and `dr help eval` print usage to stdout
+2. **Machine-readable** — `--json` emits structured JSON instead of formatted text
+3. **Predictable exit codes** — `0` ok, `1` user error, `2` bad flags
+
+### Discovery
+
+```bash
+dr --version                  # "dr X.Y.Z" + exit 0 — use to check availability
+dr help                       # top-level USAGE
+dr help eval                  # eval-specific usage (flags, exit codes, examples)
+```
+
+### One-shot research (single question)
+
+```bash
+$ dr --json "What is the capital of France?"
+{
+  "answer": "The capital of France is **Paris** [1][2].",
+  "sources": [
+    {"url": "https://en.wikipedia.org/wiki/Paris", "title": "...", "snippet": "..."},
+    {"url": "...", "title": "...", "snippet": "..."}
+  ],
+  "usage": {
+    "total_tokens": 1234,
+    "prompt_tokens": 800,
+    "completion_tokens": 434,
+    "cost_usd": 0.0015,
+    "tavily_searches": 10,
+    "tavily_cost_usd": 0.010
+  }
+}
+```
+
+Parse a single field with `jq`:
+
+```bash
+dr --json "What is 1+1?" | jq -r '.answer'
+dr --json "What is 1+1?" | jq    '.usage.cost_usd'
+```
+
+Call from Python (the `--json` flag keeps stdout parseable):
+
+```python
+import json, subprocess
+
+result = subprocess.run(
+    ["python", "dr.py", "--json", "What is the capital of France?"],
+    capture_output=True, text=True, check=True,
+)
+data = json.loads(result.stdout)
+print(data["answer"], "— sources:", len(data["sources"]))
+# Progress messages (🔍) and errors go to stderr; stdout is pure JSON
+```
+
+### Eval (CI-friendly regression detection)
+
+The eval suite is `dr`'s programmatic interface for quality measurement.
+Output is the same JSON shape you'd get from any monitoring tool:
+
+```bash
+dr eval --json | jq '.mean_score'           # 0.0-1.0
+dr eval --json | jq '.pass_rate'            # 0.0-1.0
+dr eval --json | jq '.total_cost_usd'       # dollars
+dr eval --json --gold custom.jsonl          # custom gold set
+dr eval --depth 10 --threshold 0.8          # production-like (default depth=1 is smoke)
+```
+
+Exit codes drive CI:
+
+| Exit | Meaning | CI action |
+|---|---|---|
+| `0` | Pass rate ≥ threshold | ✓ merge / deploy |
+| `1` | Pass rate < threshold | ✗ block PR / fail build |
+| `2` | Bad flag, missing API key, runtime error | ✗ bug in caller — investigate |
+
+Quick CI gate (Bash):
+```bash
+dr eval --json > eval.json
+mean=$(jq '.mean_score' eval.json)
+echo "mean_score=$mean"
+if [ "$(echo "$mean < 0.7" | bc -l)" -eq 1 ]; then exit 1; fi
+```
+
+### Gotchas
+
+- **Non-TTY detection.** `dr` with no prompt in a non-interactive subprocess
+  exits `2` with `dr: missing PROMPT. Run \`dr --help\` for usage.`
+  instead of hanging on `input()`. Sub-agents that forget to pass a prompt
+  get a clear error.
+- **Env vars in non-interactive shells.** `dr` reads `MINIMAX_API_KEY` and
+  `TAVILY_API_KEY` from the environment. Your `~/.bashrc` may have an early
+  `return` for non-interactive shells — use `bash -i -c "..."` or source
+  the env explicitly. See `_run.py` for a wrapper that does this safely.
+- **Stdout vs stderr with `--json`.** The JSON payload is on **stdout**;
+  progress (`🔍 Searching...`) and errors go to **stderr**. Parse stdout
+  only — never merge the streams.
+- **Cost budgeting.** A single question at default depth=10 typically costs
+  ~$0.011 (1 reformulate + 1 synthesis + 1 self-critique LLM call + 10
+  Tavily searches). The eval suite at depth=10 across the bundled 10-question
+  gold set is ~$0.012 total. Check `.usage.cost_usd` per question or
+  `.total_cost_usd` for the whole eval.
+- **Don't shell-glob the prompt.** Quote the prompt: `dr --json "What is X?"`.
+  Unquoted prompts get split on spaces and only the first word reaches `dr`.
+
 ## Tests
 
 ```bash
