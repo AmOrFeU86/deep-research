@@ -71,12 +71,13 @@ python dr.py "What is the meaning of life?"
 ### Eval suite
 
 ```bash
-python dr.py eval                       # run the bundled gold set
+python dr.py eval                       # run the bundled gold set (depth=1, fast)
+python dr.py eval --depth 10            # match production depth
 python dr.py eval --threshold 0.8       # stricter pass threshold
 python dr.py eval --gold path/to.jsonl  # custom gold set
 ```
 
-Each gold entry is scored 0.0-1.0 by a cheap LLM judge against a reference answer and a criteria checklist. Exits 1 if pass rate is below threshold (CI-friendly).
+Each gold entry is scored 0.0-1.0 by the configured LLM against a reference answer and a criteria checklist. Exits 1 if pass rate is below threshold (CI-friendly). Default depth is 1 for fast smoke runs; pass `--depth 10` to match production.
 
 ## Output
 

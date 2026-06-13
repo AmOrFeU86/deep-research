@@ -56,7 +56,6 @@ TAVILY_COST_PER_SEARCH_USD = 0.001
 
 # Eval suite — bundled gold set lives next to the eval tests
 DEFAULT_GOLD_PATH = Path(__file__).parent / "tests" / "eval" / "gold.jsonl"
-DEFAULT_JUDGE_MODEL = PROVIDERS[DEFAULT_PROVIDER]["default_model"]  # cheap LLM-as-judge
 DEFAULT_PASS_THRESHOLD = 0.7  # score >= threshold counts as a pass
 
 # Simple pricing per 1K tokens (USD) — updated manually or via treval prices.
@@ -1002,13 +1001,12 @@ JUDGE_SYSTEM_PROMPT = (
 
 
 def judge_answer(question: str, reference: str, answer: str,
-                 criteria: list[str], model: str, judge_model: str
-                 ) -> tuple[float, str]:
-    """Use a cheap LLM to score `answer` against `reference` and `criteria`.
+                 criteria: list[str]) -> tuple[float, str]:
+    """Use the configured LLM to score `answer` against `reference` and `criteria`.
 
-    The judge LLM is `judge_model` (default: flash — cheap). `model` is
-    the model that produced `answer`, recorded for traceability but not
-    used by the judge.
+    The same model used for research also judges, since PROVIDERS only
+    contains one entry. When multiple models become available, this
+    should be parameterised (see ROADMAP, #27 follow-up).
 
     Returns (score, reason). Raises ValueError if the judge returns
     output that parse_judge_json cannot handle.
@@ -1021,18 +1019,17 @@ def judge_answer(question: str, reference: str, answer: str,
         f"Criteria (checklist):\n{criteria_block}\n\n"
         f"Return {{\"score\": <0.0-1.0>, \"reason\": \"<why>\"}}."
     )
-    text, _usage = ask(
-        prompt=user_prompt, model=judge_model, system=JUDGE_SYSTEM_PROMPT,
-    )
+    text, _usage = ask(prompt=user_prompt, system=JUDGE_SYSTEM_PROMPT)
     return parse_judge_json(text)
 
 
 def _run_eval(gold_path: str | Path | None = None,
-              research_model: str = DEFAULT_MODEL,
-              judge_model: str = DEFAULT_JUDGE_MODEL,
               threshold: float = DEFAULT_PASS_THRESHOLD,
               depth: int = 1) -> dict:
     """Run the eval suite: for every gold entry, research + judge + record.
+
+    `depth` is the research depth for each question (default 1 for fast
+    smoke runs; pass depth=DEFAULT_DEPTH to match production).
 
     Returns a dict with aggregate stats (`mean_score`, `pass_rate`,
     `num_passed`, `num_failed`, `threshold`, `total_cost_usd`,
@@ -1064,16 +1061,13 @@ def _run_eval(gold_path: str | Path | None = None,
         start = time.perf_counter()
         try:
             response, _results, research_usage = _run_research(
-                entry["question"], depth=depth, max_results=DEFAULT_MAX_RESULTS,
-                model=research_model,
+                entry["question"], depth=depth,
             )
             score, reason = judge_answer(
                 question=entry["question"],
                 reference=entry["reference"],
                 answer=response,
                 criteria=entry["criteria"],
-                model=research_model,
-                judge_model=judge_model,
             )
             duration_ms = (time.perf_counter() - start) * 1000
             cost = research_usage.get("cost_usd", 0.0)
@@ -1140,35 +1134,32 @@ def _run_eval_cli(args: list[str]) -> None:
     """Parse `dr eval ...` flags and dispatch to _run_eval.
 
     Flags:
-      --gold PATH             path to gold.jsonl (default: bundled)
-      --judge-model MODEL     LLM used as judge (default: flash)
-      --research-model MODEL  LLM used for research (default: DEFAULT_MODEL)
-      --threshold FLOAT       pass threshold in [0, 1] (default: 0.7)
+      --gold PATH        path to gold.jsonl (default: bundled)
+      --threshold FLOAT  pass threshold in [0, 1] (default: 0.7)
+      --depth N          research depth for each question (default: 1)
     """
+    pcfg = _get_provider_config(DEFAULT_PROVIDER)
+    _require_env(pcfg["api_key_env"])
+    _require_env(TAVILY_KEY_ENV)
+
     gold_path: str | None = None
-    judge_model = DEFAULT_JUDGE_MODEL
-    research_model = DEFAULT_MODEL
     threshold = DEFAULT_PASS_THRESHOLD
+    depth = 1
 
     i = 0
     while i < len(args):
         a = args[i]
         if a == "--gold" and i + 1 < len(args):
             gold_path = args[i + 1]; i += 2
-        elif a == "--judge-model" and i + 1 < len(args):
-            judge_model = args[i + 1]; i += 2
-        elif a == "--research-model" and i + 1 < len(args):
-            research_model = args[i + 1]; i += 2
         elif a == "--threshold" and i + 1 < len(args):
             threshold = float(args[i + 1]); i += 2
+        elif a == "--depth" and i + 1 < len(args):
+            depth = max(1, int(args[i + 1])); i += 2
         else:
             print(f"Unknown flag for `dr eval`: {a}")
             sys.exit(2)
 
-    report = _run_eval(
-        gold_path=gold_path, research_model=research_model,
-        judge_model=judge_model, threshold=threshold,
-    )
+    report = _run_eval(gold_path=gold_path, threshold=threshold, depth=depth)
     _print_eval_report(report)
 
     # CI mode: if pass rate is below threshold, exit non-zero so CI can fail.

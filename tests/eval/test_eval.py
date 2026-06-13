@@ -120,30 +120,28 @@ def test_run_eval_total_cost_sums_per_question_costs():
 # Wiring
 # ---------------------------------------------------------------------------
 
-def test_run_eval_passes_research_model_to_research_call():
-    """The research_model arg flows to _run_research."""
-    with patch("dr._run_research", return_value=_stub_research()) as mock_r, \
-         patch("dr.judge_answer", return_value=_stub_judge()):
-        dr._run_eval(gold_path=_make_minimal_gold(1),
-                     research_model="deepseek/deepseek-v4-pro")
-    assert mock_r.call_args.kwargs["model"] == "deepseek/deepseek-v4-pro"
-
-
-def test_run_eval_passes_judge_model_to_judge_call():
-    """The judge_model arg flows to judge_answer."""
-    with patch("dr._run_research", return_value=_stub_research()), \
-         patch("dr.judge_answer", return_value=_stub_judge()) as mock_j:
-        dr._run_eval(gold_path=_make_minimal_gold(1),
-                     judge_model="custom-judge")
-    assert mock_j.call_args.kwargs["judge_model"] == "custom-judge"
-
-
 def test_run_eval_judge_receives_answer_from_research():
     """The answer passed to the judge is the one _run_research produced."""
     with patch("dr._run_research", return_value=_stub_research("the actual answer")), \
          patch("dr.judge_answer", return_value=_stub_judge()) as mock_j:
         dr._run_eval(gold_path=_make_minimal_gold(1))
     assert mock_j.call_args.kwargs["answer"] == "the actual answer"
+
+
+def test_run_eval_passes_depth_to_research():
+    """The depth kwarg flows from _run_eval to _run_research."""
+    with patch("dr._run_research", return_value=_stub_research()) as mock_r, \
+         patch("dr.judge_answer", return_value=_stub_judge()):
+        dr._run_eval(gold_path=_make_minimal_gold(1), depth=3)
+    assert mock_r.call_args.kwargs.get("depth") == 3
+
+
+def test_run_eval_default_depth_is_one():
+    """depth=1 is the default for fast smoke runs (not production's DEFAULT_DEPTH)."""
+    with patch("dr._run_research", return_value=_stub_research()) as mock_r, \
+         patch("dr.judge_answer", return_value=_stub_judge()):
+        dr._run_eval(gold_path=_make_minimal_gold(1))
+    assert mock_r.call_args.kwargs.get("depth", 1) == 1
 
 
 # ---------------------------------------------------------------------------

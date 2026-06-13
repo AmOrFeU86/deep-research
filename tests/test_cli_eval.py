@@ -28,16 +28,29 @@ def test_eval_subcommand_recognized_in_main():
         dr.main(["eval"])
 
 
+def test_eval_exits_with_error_if_minimax_key_missing(capsys):
+    """`dr eval` aborts with a clear message if MINIMAX_API_KEY is missing,
+    before attempting any LLM/Tavily call."""
+    import dr
+    with patch.dict("os.environ", {}, clear=True), \
+         patch("dr._run_eval") as mock_eval:
+        with __import__("pytest").raises(SystemExit) as exc:
+            dr.main(["eval"])
+        assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "MINIMAX_API_KEY" in out
+    mock_eval.assert_not_called()
+
+
 @_eval_env
 def test_eval_dispatches_to_run_eval_with_defaults():
-    """`dr eval` calls _run_eval with the bundled gold set and default judge."""
+    """`dr eval` calls _run_eval with the bundled gold set and default depth."""
     with patch("dr._run_eval", return_value=_fake_report()) as mock_eval:
         dr.main(["eval"])
-    # Default gold path: DEFAULT_GOLD_PATH; default judge model: DEFAULT_JUDGE_MODEL
+    # Default gold path: DEFAULT_GOLD_PATH; default depth: 1
     assert mock_eval.call_args.kwargs.get("gold_path") is None \
         or mock_eval.call_args.kwargs.get("gold_path") == str(dr.DEFAULT_GOLD_PATH)
-    assert mock_eval.call_args.kwargs.get("judge_model") == dr.DEFAULT_JUDGE_MODEL
-    assert mock_eval.call_args.kwargs.get("research_model") == dr.DEFAULT_MODEL
+    assert mock_eval.call_args.kwargs.get("depth") == 1
 
 
 @_eval_env
@@ -50,18 +63,11 @@ def test_eval_accepts_custom_gold_path_flag():
 
 
 @_eval_env
-def test_eval_accepts_custom_judge_model_flag():
-    """`dr eval --judge-model X` passes the judge model to _run_eval."""
+def test_eval_accepts_depth_flag():
+    """`dr eval --depth N` passes the depth to _run_eval."""
     with patch("dr._run_eval", return_value=_fake_report()) as mock_eval:
-        dr.main(["eval", "--judge-model", "deepseek/deepseek-v4-pro"])
-    assert mock_eval.call_args.kwargs.get("judge_model") == "deepseek/deepseek-v4-pro"
-
-
-@_eval_env
-def test_eval_accepts_custom_research_model_flag():
-    with patch("dr._run_eval", return_value=_fake_report()) as mock_eval:
-        dr.main(["eval", "--research-model", "deepseek/deepseek-v3"])
-    assert mock_eval.call_args.kwargs.get("research_model") == "deepseek/deepseek-v3"
+        dr.main(["eval", "--depth", "5"])
+    assert mock_eval.call_args.kwargs.get("depth") == 5
 
 
 @_eval_env
