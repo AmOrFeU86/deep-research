@@ -359,7 +359,10 @@ REFORMULATE_SYSTEM_PROMPT = (
     "maximize web search coverage. Generate variants of the "
     "provided question, each focusing on a different aspect "
     "or using different terminology. Respond ONLY with the numbered "
-    "list of variants, one per line, with no explanations or extra text."
+    "list of variants, one per line, with no explanations or extra text. "
+    "Do NOT include any thinking, reasoning, preamble, or commentary. "
+    "Output the numbered list immediately, with no "
+    "wrapping."
 )
 
 AGENTIC_SYSTEM_PROMPT = (
@@ -500,25 +503,58 @@ def reformulate(prompt: str, n: int) -> list[str]:
 
     Returns a list of n variants. Each variant is a distinct way to ask
     the same research question, designed to surface different web results.
+
+    Defensive parsing: strips <think>...</think> blocks (some reasoning
+    models prepend them), and drops lines that look like internal model
+    narration rather than actual question variants.
     """
+    import re
     text, _ = ask(
         f"Pregunta original: {prompt}",
         system=REFORMULATE_SYSTEM_PROMPT,
     )
+    # Defensive: strip closed and unclosed <think> blocks some models prepend
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    text = re.sub(r"<think>.*", "", text, flags=re.DOTALL)
+    text = text.strip()
+
+    # Patterns that indicate the model is narrating its own thinking,
+    # not producing a real question variant. Matched case-insensitively
+    # at the start of a line (after the list marker is stripped).
+    _NARRATION_STARTS = (
+        "the user wants",
+        "let me",
+        "i need to",
+        "i should",
+        "i will",
+        "i can",
+        "different terminology",
+        "different focus",
+        "different angles",
+        "different phrasings",
+        "original phrasing",
+        "alternative phrasings",
+        "direct question",
+    )
+
     variants = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
             continue
         # Strip common list markers: "1.", "1)", "-", "•"
-        import re
         m = re.match(r"^[\d]+[.)]\s*(.+)", line)
         if m:
-            variants.append(m.group(1).strip())
+            content = m.group(1).strip()
         elif line.startswith(("-", "•", "*")):
-            variants.append(line[1:].strip())
+            content = line[1:].strip()
         else:
-            variants.append(line)
+            content = line
+        # Drop lines that are clearly narration, not question variants
+        low = content.lower()
+        if any(low.startswith(p) for p in _NARRATION_STARTS):
+            continue
+        variants.append(content)
     return variants[:n]
 
 
