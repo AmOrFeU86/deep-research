@@ -75,7 +75,15 @@ def test_tavily_search_span_is_child_of_research():
 
 
 def test_llm_span_is_child_of_research(minimax_key, tavily_key):
-    """[integration] Real OpenAI + treval.instrument: LLM span has research as parent."""
+    """[integration] Real OpenAI + treval.instrument: every LLM span emitted
+    by _run_research is parented to the 'research' OPERATION span.
+
+    With the current defaults (SELF_CRITIQUE=True, DEFAULT_DEPTH=10),
+    _run_research fires 3 LLM calls — reformulate, the main research
+    ask, and verify_citations — and all three must share the same
+    research OPERATION as parent so the treval dashboard shows one
+    clean tree. We assert every LLM span, not just one.
+    """
     from dr import _run_research
     from treval.db import SpanStore
 
@@ -86,9 +94,13 @@ def test_llm_span_is_child_of_research(minimax_key, tavily_key):
     research_id = roots[0]["id"]
 
     llms = store.list_spans(limit=10, type="LLM")
-    assert len(llms) == 1
-    assert llms[0]["name"].startswith("llm.")
-    assert llms[0]["parent_id"] == research_id
+    assert len(llms) >= 1, f"expected >=1 LLM span, got {len(llms)}"
+    for llm in llms:
+        assert llm["name"].startswith("llm."), f"unexpected LLM span name: {llm['name']}"
+        assert llm["parent_id"] == research_id, (
+            f"LLM span {llm['name']} has parent_id={llm['parent_id']}, "
+            f"expected {research_id}"
+        )
 
 
 test_llm_span_is_child_of_research = pytest.mark.integration(test_llm_span_is_child_of_research)
