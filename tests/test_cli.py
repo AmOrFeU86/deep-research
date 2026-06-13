@@ -3,6 +3,11 @@
 The whole pipeline is mocked — no network, no real LLM. We verify the
 *orchestration*: order of calls, prompt plumbing, output formatting,
 and the --report flag triggering treval dashboard export.
+
+Since the default depth is 10, we patch `dr.reformulate` to return []
+in most tests so they exercise the same single-query path the old
+depth=1 default used. Tests that explicitly want to exercise
+reformulation can leave the mock off.
 """
 import subprocess
 from unittest.mock import MagicMock, patch
@@ -17,7 +22,7 @@ SAMPLE_RESULTS = [
 def _setup_mocks(mock_search, mock_ask, text="the answer"):
     mock_search.return_value = SAMPLE_RESULTS
     mock_ask.return_value = (text, {
-        "model": "deepseek/deepseek-v4-flash",
+        "model": "MiniMax-M3",
         "prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150,
         "cost_usd": 0.0001,
     })
@@ -28,6 +33,7 @@ def test_main_always_searches_before_asking(capsys):
     from dr import main
 
     with patch("dr.search") as mock_search, patch("dr.ask") as mock_ask, \
+         patch("dr.reformulate", return_value=[]), \
          patch("dr.subprocess"):
         _setup_mocks(mock_search, mock_ask)
         main(["what is X?"])
@@ -47,6 +53,7 @@ def test_main_prints_sources_after_response(capsys):
     from dr import main
 
     with patch("dr.search") as mock_search, patch("dr.ask") as mock_ask, \
+         patch("dr.reformulate", return_value=[]), \
          patch("dr.subprocess"):
         _setup_mocks(mock_search, mock_ask)
         main(["anything"])
@@ -62,6 +69,7 @@ def test_main_prints_llm_response(capsys):
     from dr import main
 
     with patch("dr.search") as mock_search, patch("dr.ask") as mock_ask, \
+         patch("dr.reformulate", return_value=[]), \
          patch("dr.subprocess"):
         _setup_mocks(mock_search, mock_ask, text="the answer is 42")
         main(["question"])
@@ -75,11 +83,13 @@ def test_main_reads_prompt_from_argv(capsys):
     from dr import main
 
     with patch("dr.search") as mock_search, patch("dr.ask") as mock_ask, \
+         patch("dr.reformulate", return_value=[]), \
          patch("dr.subprocess"), patch("dr.input") as mock_input:
         _setup_mocks(mock_search, mock_ask)
         main(["from argv"])
 
     mock_input.assert_not_called()
+    # With reformulate mocked to [], search is called exactly once with the prompt
     assert mock_search.call_args.args[0] == "from argv"
 
 
@@ -88,6 +98,7 @@ def test_main_prompts_via_stdin_when_no_argv(capsys):
     from dr import main
 
     with patch("dr.search") as mock_search, patch("dr.ask") as mock_ask, \
+         patch("dr.reformulate", return_value=[]), \
          patch("dr.subprocess"), patch("dr.input", return_value="from stdin") as mock_input:
         _setup_mocks(mock_search, mock_ask)
         main([])
@@ -101,6 +112,7 @@ def test_main_runs_treval_dashboard_export_with_report_flag(capsys):
     from dr import main
 
     with patch("dr.search") as mock_search, patch("dr.ask") as mock_ask, \
+         patch("dr.reformulate", return_value=[]), \
          patch("dr.subprocess.run") as mock_run:
         _setup_mocks(mock_search, mock_ask)
         main(["--report", "q"])
@@ -118,6 +130,7 @@ def test_main_skips_dashboard_export_without_report_flag(capsys):
     from dr import main
 
     with patch("dr.search") as mock_search, patch("dr.ask") as mock_ask, \
+         patch("dr.reformulate", return_value=[]), \
          patch("dr.subprocess.run") as mock_run:
         _setup_mocks(mock_search, mock_ask)
         main(["q"])
@@ -125,8 +138,8 @@ def test_main_skips_dashboard_export_without_report_flag(capsys):
     mock_run.assert_not_called()
 
 
-def test_main_exits_with_error_if_openrouter_key_missing(capsys):
-    """main() aborts with a clear message if OPENROUTER_API_KEY is missing."""
+def test_main_exits_with_error_if_minimax_key_missing(capsys):
+    """main() aborts with a clear message if MINIMAX_API_KEY is missing."""
     from dr import main
 
     with patch.dict("os.environ", {}, clear=True), \
@@ -137,5 +150,5 @@ def test_main_exits_with_error_if_openrouter_key_missing(capsys):
         assert exc.value.code == 1
 
     out = capsys.readouterr().out
-    assert "OPENROUTER_API_KEY" in out
+    assert "MINIMAX_API_KEY" in out
     mock_search.assert_not_called()

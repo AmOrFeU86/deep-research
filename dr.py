@@ -17,18 +17,34 @@ from tavily import TavilyClient
 # Auto-instrument OpenAI to capture every call as a treval span
 treval.instrument()
 
-DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
-DEFAULT_FALLBACK = "deepseek/deepseek-v4-pro"  # Used when primary model fails
-API_KEY_ENV = "OPENROUTER_API_KEY"
+# --- Provider configuration --------------------------------------------------
+# Single OpenAI-compatible endpoint, fixed by design. Kept as a dict so
+# adding a new provider later is a one-line change.
+PROVIDERS = {
+    "minimax": {
+        "base_url": "https://api.minimaxi.chat/v1",
+        "api_key_env": "MINIMAX_API_KEY",
+        "default_model": "MiniMax-M3",
+    },
+}
+
+DEFAULT_PROVIDER = "minimax"
+DEFAULT_MODEL = PROVIDERS[DEFAULT_PROVIDER]["default_model"]
 TAVILY_KEY_ENV = "TAVILY_API_KEY"
-DEFAULT_MAX_RESULTS = 3
+
+# Search behavior — fixed by design (no flags). Quality knobs live here.
+DEFAULT_MAX_RESULTS = 3           # Tavily results per query
+DEFAULT_DEPTH = 10                # 1 original + 9 reformulations
+DEFAULT_SEARCH_DEPTH = "basic"    # Tavily: "basic" (cheap) or "advanced" (deeper, ~3x)
+
+# Post-answer quality gate
+SELF_CRITIQUE = True              # Always re-prompt if verify_citations finds issues
 
 # Resilience
 MAX_RETRIES = 3
-RETRY_BASE_SECONDS = 1.0  # Sleep = base * 2^attempt, so 1s, 2s, 4s...
-DEFAULT_TEMPERATURE = 0  # Deterministic output for research
-DEFAULT_TIMEOUT_SECONDS = 30  # Per-request timeout for the OpenAI client
-DEFAULT_SEARCH_DEPTH = "basic"  # Tavily: "basic" (cheap) or "advanced" (deeper)
+RETRY_BASE_SECONDS = 1.0          # Sleep = base * 2^attempt, so 1s, 2s, 4s...
+DEFAULT_TEMPERATURE = 0           # Deterministic output for research
+DEFAULT_TIMEOUT_SECONDS = 30      # Per-request timeout for the OpenAI client
 
 # Local SQLite cache for Tavily results (avoids repeat HTTP calls)
 CACHE_DB_PATH = Path.home() / ".treval" / "search_cache.db"
@@ -40,15 +56,15 @@ TAVILY_COST_PER_SEARCH_USD = 0.001
 
 # Eval suite — bundled gold set lives next to the eval tests
 DEFAULT_GOLD_PATH = Path(__file__).parent / "tests" / "eval" / "gold.jsonl"
-DEFAULT_JUDGE_MODEL = "deepseek/deepseek-v4-flash"  # cheap LLM-as-judge
+DEFAULT_JUDGE_MODEL = PROVIDERS[DEFAULT_PROVIDER]["default_model"]  # cheap LLM-as-judge
 DEFAULT_PASS_THRESHOLD = 0.7  # score >= threshold counts as a pass
 
-# Simple pricing per 1K tokens (USD) — updated manually or via treval prices
+# Simple pricing per 1K tokens (USD) — updated manually or via treval prices.
+# MiniMax-M3 pricing is a placeholder; real rates need to be confirmed
+# against the provider's published price list. Unknown models fall through
+# estimate_cost() to a 0.0 cost.
 MODEL_PRICES = {
-    "deepseek/deepseek-v4-flash": {"input": 0.0001, "output": 0.0004},
-    "deepseek/deepseek-v4-pro":   {"input": 0.0003, "output": 0.0012},
-    "deepseek/deepseek-r1":       {"input": 0.00055, "output": 0.00219},
-    "deepseek/deepseek-v3":       {"input": 0.00027, "output": 0.0011},
+    "MiniMax-M3": {"input": 0.0001, "output": 0.0004},  # TODO: verify real rate
     # fallback for unknown models
 }
 
@@ -319,6 +335,18 @@ def _require_env(var: str) -> str:
     return val
 
 
+def _get_provider_config(name: str) -> dict:
+    """Look up a provider entry from PROVIDERS; abort with a clear message
+    on unknown names. Centralises the 'is this provider registered?' check
+    so ask() / verify_citations() / main() all behave consistently.
+    """
+    if name not in PROVIDERS:
+        valid = ", ".join(sorted(PROVIDERS))
+        print(f"❌ Unknown provider '{name}'. Available: {valid}")
+        sys.exit(2)
+    return PROVIDERS[name]
+
+
 SYSTEM_PROMPT = (
     "You are a deep research assistant. "
     "Answer using EXCLUSIVELY the information from the sources provided. "
@@ -392,40 +420,38 @@ VERIFY_SYSTEM_PROMPT = (
 
 
 def _is_transient_error(exc: Exception) -> bool:
-    """True for errors worth retrying (network, timeout, server errors)."""
+    """True for errors worth retrying (network, timeout, rate limit, server)."""
     try:
-        from openai import AuthenticationError, BadRequestError
+        from openai import APIStatusError, AuthenticationError, BadRequestError
         if isinstance(exc, (AuthenticationError, BadRequestError)):
             return False
+        if isinstance(exc, APIStatusError):
+            # 429 (rate limit) and 5xx (server) are worth retrying
+            return exc.status_code in (429,) or exc.status_code >= 500
     except ImportError:
         pass
     return isinstance(exc, (ConnectionError, TimeoutError, OSError))
 
 
-def ask(prompt: str, model: str = DEFAULT_MODEL, context: str | None = None,
-        system: str | None = None, fallback: str | None = None,
+def ask(prompt: str, context: str | None = None,
+        system: str | None = None,
         max_retries: int = MAX_RETRIES, stream: bool = False,
         timeout: float | None = DEFAULT_TIMEOUT_SECONDS):
-    """Call the LLM with retry-on-transient and optional model fallback.
+    """Call the LLM with retry-on-transient.
 
-    Tries `model` up to `max_retries` times. On exhausted retries, if
-    `fallback` is set, tries it up to `max_retries` times. If both fail,
-    re-raises the original primary-model exception.
-
-    Non-transient errors (auth, bad request) raise immediately.
+    Tries the configured model up to `max_retries` times on transient
+    errors (network, timeout, 429, 5xx). Non-transient errors (auth,
+    bad request) raise immediately.
 
     If stream=True, returns an iterator yielding text tokens.
     If stream=False, returns a (full_text, usage_dict) tuple.
     """
     import time
 
+    pcfg = _get_provider_config(DEFAULT_PROVIDER)
     client = OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=os.environ.get(API_KEY_ENV),
-        default_headers={
-            "HTTP-Referer": "https://github.com/AmOrFeU86/deep-research",
-            "X-Title": "deep-research",
-        },
+        base_url=pcfg["base_url"],
+        api_key=os.environ.get(pcfg["api_key_env"]),
     )
     user_content = prompt
     if context:
@@ -433,19 +459,14 @@ def ask(prompt: str, model: str = DEFAULT_MODEL, context: str | None = None,
     messages = [{"role": "system", "content": system or SYSTEM_PROMPT}]
     messages.append({"role": "user", "content": user_content})
 
-    models_to_try = [model]
-    if fallback:
-        models_to_try.append(fallback)
-
-    primary_exc: Exception | None = None
     last_exc: Exception | None = None
 
-    def _stream_response(m: str):
+    def _stream_response():
         """Yield text tokens from a streaming response."""
         for attempt in range(max_retries):
             try:
                 resp = client.chat.completions.create(
-                    model=m,
+                    model=DEFAULT_MODEL,
                     messages=messages,
                     temperature=DEFAULT_TEMPERATURE,
                     max_tokens=2000,
@@ -457,64 +478,55 @@ def ask(prompt: str, model: str = DEFAULT_MODEL, context: str | None = None,
                         yield chunk.choices[0].delta.content
                 return
             except Exception as e:
-                nonlocal primary_exc, last_exc
+                nonlocal last_exc
                 last_exc = e
-                if m == model:
-                    primary_exc = e
                 if not _is_transient_error(e):
                     raise
                 if attempt < max_retries - 1:
                     time.sleep(RETRY_BASE_SECONDS * (2 ** attempt))
-        if primary_exc is not None:
-            raise primary_exc
         if last_exc is not None:
             raise last_exc
 
     if stream:
-        return _stream_response(model)
+        return _stream_response()
 
-    for m in models_to_try:
-        for attempt in range(max_retries):
-            try:
-                resp = client.chat.completions.create(
-                    model=m,
-                    messages=messages,
-                    temperature=DEFAULT_TEMPERATURE,
-                    max_tokens=2000,
-                    timeout=timeout,
-                )
-                text = resp.choices[0].message.content or ""
-                usage = {}
-                if hasattr(resp, "usage") and resp.usage:
-                    prompt_tk = getattr(resp.usage, "prompt_tokens", 0)
-                    completion_tk = getattr(resp.usage, "completion_tokens", 0)
-                    total_tk = getattr(resp.usage, "total_tokens", 0)
-                    cost = estimate_cost(m, prompt_tk, completion_tk)
-                    usage = {
-                        "model": m,
-                        "prompt_tokens": prompt_tk,
-                        "completion_tokens": completion_tk,
-                        "total_tokens": total_tk,
-                        "cost_usd": round(cost, 5),
-                    }
-                return text, usage
-            except Exception as e:
-                last_exc = e
-                if m == model:
-                    primary_exc = e
-                if not _is_transient_error(e):
-                    raise
-                if attempt < max_retries - 1:
-                    time.sleep(RETRY_BASE_SECONDS * (2 ** attempt))
+    for attempt in range(max_retries):
+        try:
+            resp = client.chat.completions.create(
+                model=DEFAULT_MODEL,
+                messages=messages,
+                temperature=DEFAULT_TEMPERATURE,
+                max_tokens=2000,
+                timeout=timeout,
+            )
+            text = resp.choices[0].message.content or ""
+            usage = {}
+            if hasattr(resp, "usage") and resp.usage:
+                prompt_tk = getattr(resp.usage, "prompt_tokens", 0)
+                completion_tk = getattr(resp.usage, "completion_tokens", 0)
+                total_tk = getattr(resp.usage, "total_tokens", 0)
+                cost = estimate_cost(DEFAULT_MODEL, prompt_tk, completion_tk)
+                usage = {
+                    "model": DEFAULT_MODEL,
+                    "prompt_tokens": prompt_tk,
+                    "completion_tokens": completion_tk,
+                    "total_tokens": total_tk,
+                    "cost_usd": round(cost, 5),
+                }
+            return text, usage
+        except Exception as e:
+            last_exc = e
+            if not _is_transient_error(e):
+                raise
+            if attempt < max_retries - 1:
+                time.sleep(RETRY_BASE_SECONDS * (2 ** attempt))
 
-    if primary_exc is not None:
-        raise primary_exc
     if last_exc is not None:
         raise last_exc
     return "", {}  # unreachable, satisfies type checkers
 
 
-def reformulate(prompt: str, n: int, model: str = DEFAULT_MODEL) -> list[str]:
+def reformulate(prompt: str, n: int) -> list[str]:
     """Use an LLM to rephrase `prompt` in `n` different ways.
 
     Returns a list of n variants. Each variant is a distinct way to ask
@@ -522,7 +534,6 @@ def reformulate(prompt: str, n: int, model: str = DEFAULT_MODEL) -> list[str]:
     """
     text, _ = ask(
         f"Pregunta original: {prompt}",
-        model=model,
         system=REFORMULATE_SYSTEM_PROMPT,
     )
     variants = []
@@ -569,12 +580,55 @@ def _print_sources(results: list[dict]) -> None:
     print(f"{'─' * 78}\n")
 
 
-def _run_research(prompt: str, depth: int = 1,
-                  max_results: int = DEFAULT_MAX_RESULTS,
-                  model: str = DEFAULT_MODEL,
-                  fallback: str | None = None,
-                  context: str | None = None,
-                  show_snippets: bool = False) -> tuple[str, list[dict], dict]:
+def _self_critique(prompt: str, response: str, results: list[dict],
+                  context: str, usage_in: dict) -> tuple[str, dict, dict]:
+    """Run verify_citations and, on issues, re-prompt the LLM with the critique.
+
+    Always runs when SELF_CRITIQUE is True. Returns the final response
+    (original if already clean, rewritten if the verifier flagged issues),
+    the verifier report, and the accumulated usage (including the re-prompt
+    if any).
+    """
+    verify_report = verify_citations(response, results)
+    if verify_report["verified"] or not verify_report["issues"]:
+        return response, verify_report, usage_in
+
+    # Build a critique block and re-prompt the model to fix the issues
+    critique_lines = [
+        f"- {i.get('citation', '?')}: {i.get('reason', '?')}"
+        for i in verify_report["issues"]
+    ]
+    critique = "\n".join(critique_lines)
+    new_response, extra_usage = ask(
+        f"Your previous answer to: {prompt}\n\n"
+        f"Was flagged with these citation issues:\n{critique}\n\n"
+        f"Rewrite the answer correcting those issues. Use the same sources "
+        f"and citation format.",
+        context=context,
+    )
+    usage_out = dict(usage_in)
+    for k in ("prompt_tokens", "completion_tokens", "total_tokens", "cost_usd"):
+        usage_out[k] = usage_out.get(k, 0) + extra_usage.get(k, 0)
+    return new_response, verify_report, usage_out
+
+
+def _print_footer(usage: dict) -> None:
+    """Print the standard tokens / cost footer."""
+    if not usage.get("total_tokens"):
+        return
+    llm_cost = usage.get("cost_usd", 0)
+    tavily_n = usage.get("tavily_searches", 0)
+    tavily_cost = usage.get("tavily_cost_usd", 0.0)
+    print(f"  Tokens:    {usage.get('prompt_tokens', 0)}↑ + "
+          f"{usage.get('completion_tokens', 0)}↓ = {usage['total_tokens']}")
+    print(f"  LLM cost:  ${llm_cost:.5f}")
+    print(f"  Tavily:    {tavily_n} search × "
+          f"${TAVILY_COST_PER_SEARCH_USD:.4f} = ${tavily_cost:.5f}")
+    print(f"  Total:     ${llm_cost + tavily_cost:.5f}")
+
+
+def _run_research(prompt: str, depth: int = DEFAULT_DEPTH,
+                  context: str | None = None) -> tuple[str, list[dict], dict]:
     """Run a full research task wrapped in a parent OPERATION span.
 
     With depth=1: 1 search of the original query.
@@ -587,6 +641,9 @@ def _run_research(prompt: str, depth: int = 1,
     Creates a 'research' OPERATION span and pushes it onto the context
     stack, so nested @treval.tool spans (Tavily) and the auto-instrumented
     OpenAI LLM span both have it as their parent_id.
+
+    When SELF_CRITIQUE is True, runs verify_citations after the first
+    answer and re-prompts with the critique if issues are found.
     """
     from treval.context import pop_span, push_span
     from treval.db import SpanStore
@@ -600,7 +657,6 @@ def _run_research(prompt: str, depth: int = 1,
     )
     push_span(root_id)
     try:
-        # Build the list of queries to search
         queries = [prompt]
         if depth > 1:
             extra = reformulate(prompt, n=depth - 1)
@@ -609,29 +665,31 @@ def _run_research(prompt: str, depth: int = 1,
                 # Reformulation failed; fall back to original-only
                 queries = [prompt]
 
-        # Multi-search with dedup by URL (parallel when depth>1)
-        all_results = parallel_search(queries, max_results=max_results,
+        all_results = parallel_search(queries, max_results=DEFAULT_MAX_RESULTS,
                                       parent_id=root_id)
-        if show_snippets:
-            _print_sources(all_results)
 
         # Combine REPL history (if any) with the search results before asking.
         search_ctx = format_context(all_results)
         merged_context = f"{context}\n\n---\n\n{search_ctx}" if context else search_ctx
-        response, usage = ask(prompt, context=merged_context,
-                              model=model, fallback=fallback)
+        response, usage = ask(prompt, context=merged_context)
         tavily_searches = len(queries)
         usage["tavily_searches"] = tavily_searches
         usage["tavily_cost_usd"] = round(tavily_searches * TAVILY_COST_PER_SEARCH_USD, 5)
 
-        # Static citation enforcement: warn the user if the LLM invented
-        # [N] that don't correspond to a real source. We don't strip them
-        # by default — leaving the LLM text intact and just flagging
-        # the problem is the safer default.
-        _, invalid = enforce_citations(response, num_sources=len(all_results))
-        if invalid:
-            print(f"⚠️  Invalid citations in response: {invalid} "
-                  f"(only {len(all_results)} sources available)")
+        # Self-critique: re-prompt if verify_citations finds issues
+        if SELF_CRITIQUE:
+            response, verify_report, usage = _self_critique(
+                prompt, response, all_results, merged_context, usage,
+            )
+            if not verify_report["verified"]:
+                print(f"  ⚠️  Self-critique re-prompted: "
+                      f"{len(verify_report['issues'])} issue(s) flagged")
+        else:
+            # Static citation enforcement (regex) when self-critique is off
+            _, invalid = enforce_citations(response, num_sources=len(all_results))
+            if invalid:
+                print(f"  ⚠️  Invalid citations: {invalid} "
+                      f"(only {len(all_results)} sources available)")
 
         store.update(root_id, output=response,
                      metadata=_source_metadata(all_results, tavily_searches,
@@ -641,12 +699,13 @@ def _run_research(prompt: str, depth: int = 1,
         pop_span()
 
 
-def _run_research_streaming(prompt: str, depth: int = 1,
-                            max_results: int = DEFAULT_MAX_RESULTS,
-                            model: str = DEFAULT_MODEL,
-                            fallback: str | None = None,
-                            show_snippets: bool = False) -> None:
-    """Same as _run_research but prints the LLM response as it streams in."""
+def _run_research_streaming(prompt: str, depth: int = DEFAULT_DEPTH) -> None:
+    """Same as _run_research but prints the LLM response as it streams in.
+
+    Streaming responses do not include token usage on the final chunk
+    (depends on the provider), so the footer reports the Tavily half of
+    the cost. The LLM tokens/cost are omitted rather than estimated.
+    """
     from treval.context import pop_span, push_span
     from treval.db import SpanStore
 
@@ -666,25 +725,31 @@ def _run_research_streaming(prompt: str, depth: int = 1,
             if not extra:
                 queries = [prompt]
 
-        all_results = parallel_search(queries, max_results=max_results,
+        all_results = parallel_search(queries, max_results=DEFAULT_MAX_RESULTS,
                                       parent_id=root_id)
-        if show_snippets:
-            _print_sources(all_results)
 
         # Stream the response, printing tokens as they arrive
         full_response = []
         for token in ask(prompt, context=format_context(all_results),
-                         model=model, fallback=fallback, stream=True):
+                         stream=True):
             print(token, end="", flush=True)
             full_response.append(token)
         print()  # newline after stream completes
         response = "".join(full_response)
 
-        # Static citation enforcement on the joined streamed text.
-        _, invalid = enforce_citations(response, num_sources=len(all_results))
-        if invalid:
-            print(f"\n⚠️  Invalid citations in response: {invalid} "
-                  f"(only {len(all_results)} sources available)")
+        # Self-critique: re-prompt if verify_citations finds issues
+        if SELF_CRITIQUE:
+            response, verify_report, _ = _self_critique(
+                prompt, response, all_results, format_context(all_results), {},
+            )
+            if not verify_report["verified"]:
+                print(f"  ⚠️  Self-critique re-prompted: "
+                      f"{len(verify_report['issues'])} issue(s) flagged")
+        else:
+            _, invalid = enforce_citations(response, num_sources=len(all_results))
+            if invalid:
+                print(f"  ⚠️  Invalid citations in response: {invalid} "
+                      f"(only {len(all_results)} sources available)")
 
         print(f"\n{'─' * 40}")
         sources = format_sources(all_results)
@@ -692,6 +757,9 @@ def _run_research_streaming(prompt: str, depth: int = 1,
             print(f"\n{sources}")
         tavily_searches = len(queries)
         tavily_cost = round(tavily_searches * TAVILY_COST_PER_SEARCH_USD, 5)
+        print(f"  Tavily:    {tavily_searches} search × "
+              f"${TAVILY_COST_PER_SEARCH_USD:.4f} = ${tavily_cost:.5f}")
+        print(f"  (stream: LLM token cost not reported)")
         store.update(root_id, output=response,
                      metadata=_source_metadata(all_results, tavily_searches,
                                                tavily_cost))
@@ -720,13 +788,13 @@ def parse_action(text: str) -> dict:
     raise ValueError(f"Could not parse action from LLM response: {text!r}")
 
 
-def verify_citations(draft: str, sources: list[dict],
-                     model: str = DEFAULT_MODEL) -> dict:
+def verify_citations(draft: str, sources: list[dict]) -> dict:
     """Second LLM pass that checks every [N] citation in `draft` is supported.
 
     Returns a dict with keys:
         - "verified": True if all citations check out, False otherwise
         - "issues": list of {"citation": "[N]", "reason": "..."} for problems
+        - "model": which model ran the verification
 
     On JSON parse failure (LLM returns garbage), defaults to verified=True
     with a single issue noting the parse error — we don't want to block the
@@ -735,7 +803,7 @@ def verify_citations(draft: str, sources: list[dict],
     import re
 
     if not sources:
-        return {"verified": True, "issues": [], "model": model}
+        return {"verified": True, "issues": [], "model": DEFAULT_MODEL}
 
     # Build the verification prompt: sources list + draft
     sources_block = "\n\n".join(
@@ -749,16 +817,13 @@ def verify_citations(draft: str, sources: list[dict],
     )
 
     try:
+        pcfg = _get_provider_config(DEFAULT_PROVIDER)
         client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=os.environ.get(API_KEY_ENV),
-            default_headers={
-                "HTTP-Referer": "https://github.com/AmOrFeU86/deep-research",
-                "X-Title": "deep-research",
-            },
+            base_url=pcfg["base_url"],
+            api_key=os.environ.get(pcfg["api_key_env"]),
         )
         resp = client.chat.completions.create(
-            model=model,
+            model=DEFAULT_MODEL,
             messages=[
                 {"role": "system", "content": VERIFY_SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
@@ -769,7 +834,7 @@ def verify_citations(draft: str, sources: list[dict],
         )
         text = resp.choices[0].message.content or ""
     except Exception as e:
-        return {"verified": True, "issues": [{"citation": "—", "reason": f"verifier error: {e}"}], "model": model}
+        return {"verified": True, "issues": [{"citation": "—", "reason": f"verifier error: {e}"}], "model": DEFAULT_MODEL}
 
     # Try to parse the JSON response (with the same tolerant logic as parse_action)
     try:
@@ -780,50 +845,66 @@ def verify_citations(draft: str, sources: list[dict],
             try:
                 result = json.loads(match.group(0))
             except json.JSONDecodeError:
-                return {"verified": True, "issues": [{"citation": "—", "reason": "verifier returned unparseable output"}], "model": model}
+                return {"verified": True, "issues": [{"citation": "—", "reason": "verifier returned unparseable output"}], "model": DEFAULT_MODEL}
         else:
-            return {"verified": True, "issues": [{"citation": "—", "reason": "verifier returned unparseable output"}], "model": model}
+            return {"verified": True, "issues": [{"citation": "—", "reason": "verifier returned unparseable output"}], "model": DEFAULT_MODEL}
 
     # Normalize the result
     if not isinstance(result, dict):
-        return {"verified": True, "issues": [{"citation": "—", "reason": "verifier returned non-dict"}], "model": model}
+        return {"verified": True, "issues": [{"citation": "—", "reason": "verifier returned non-dict"}], "model": DEFAULT_MODEL}
 
     return {
         "verified": bool(result.get("verified", False)),
         "issues": result.get("issues", []),
-        "model": model,
+        "model": DEFAULT_MODEL,
     }
 
 
-def run_research_agentic(prompt: str, model: str = DEFAULT_MODEL,
-                         fallback: str | None = None,
-                         max_iterations: int = 3,
-                         max_results: int = DEFAULT_MAX_RESULTS,
-                         show_snippets: bool = False,
-                         ) -> tuple[str, list[dict], dict]:
+def run_research_agentic(prompt: str, max_iterations: int = 3,
+                         min_searches: int = 0) -> tuple[str, list[dict], dict]:
     """ReAct-style research loop where the LLM decides when to stop searching.
 
     On each iteration the LLM responds with JSON:
         {"action": "search", "query": "..."}   -> run a Tavily search and
-                                                   feed the result back as
-                                                   an observation.
+                                                  feed the result back as
+                                                  an observation.
         {"action": "answer", "answer": "..."}  -> loop ends, return answer.
 
     The loop also stops after `max_iterations` rounds to prevent infinite
     loops when the model keeps asking to search.
 
-    Each LLM call is auto-instrumented by treval (one LLM span per turn);
-    each search is wrapped by the @treval.tool span on search_cached.
+    `min_searches` (default 0) forces the loop to perform at least that
+    many Tavily searches before the LLM is allowed to exit with
+    `action: answer`. When the LLM tries to answer too early, the code
+    silently forces another search with the original prompt and
+    re-prompts — the early "answer" is discarded.
+
+    NOTE: Not exposed in the CLI anymore — the default route (depth=10 +
+    self-critique) is the recommended path. Kept here as a public
+    function for tests and for #28 (deep exploration) on the roadmap.
     """
     from treval.context import pop_span, push_span
     from treval.db import SpanStore
+
+    # Augment the system prompt to enforce min_searches when set. We
+    # tell the LLM up front (it tends to comply on the first iteration,
+    # which saves us from having to override its decisions later).
+    system_prompt = AGENTIC_SYSTEM_PROMPT
+    if min_searches > 0:
+        system_prompt = system_prompt + (
+            f"\n\nIMPORTANT: You MUST do at least {min_searches} web "
+            f"searches before answering. The first {min_searches} "
+            f"iterations MUST request a search (action: search). Only "
+            f"after {min_searches} searches have been performed may you "
+            f"respond with action: answer."
+        )
 
     store = SpanStore()
     root_id = store.save(
         name="research_agentic",
         type="OPERATION",
         status="ok",
-        input=f"{prompt} [agentic, max_iter={max_iterations}]",
+        input=f"{prompt} [agentic, max_iter={max_iterations}, min_searches={min_searches}]",
     )
     push_span(root_id)
     try:
@@ -832,7 +913,7 @@ def run_research_agentic(prompt: str, model: str = DEFAULT_MODEL,
         observations: list[str] = []
         answer: str = ""
         total_usage = {
-            "model": model,
+            "model": DEFAULT_MODEL,
             "prompt_tokens": 0, "completion_tokens": 0,
             "total_tokens": 0, "cost_usd": 0.0,
         }
@@ -840,8 +921,7 @@ def run_research_agentic(prompt: str, model: str = DEFAULT_MODEL,
 
         for i in range(max_iterations):
             context = "\n\n".join(observations) if observations else None
-            text, usage = ask(prompt, context=context, model=model,
-                              fallback=fallback, system=AGENTIC_SYSTEM_PROMPT)
+            text, usage = ask(prompt, context=context, system=system_prompt)
             for k in ("prompt_tokens", "completion_tokens", "total_tokens", "cost_usd"):
                 total_usage[k] += usage.get(k, 0)
 
@@ -854,15 +934,35 @@ def run_research_agentic(prompt: str, model: str = DEFAULT_MODEL,
 
             if action.get("action") == "answer":
                 answer = action.get("answer", "")
+
+                # min_searches enforcement: if the LLM tries to exit before
+                # the budget is exhausted, discard the "answer" and force
+                # another search with the original prompt. The LLM gets
+                # another chance on the next iteration to either search
+                # again or — once the budget is met — give the real answer.
+                if searches_done < min_searches:
+                    query = prompt
+                    for r in search_cached(query, max_results=DEFAULT_MAX_RESULTS):
+                        if r["url"] not in seen_urls:
+                            seen_urls.add(r["url"])
+                            all_results.append(r)
+                            observations.append(
+                                f"Observation {searches_done + 1} "
+                                f"(min_searches forced, query: "
+                                f"\"{query}\"):\n{format_context([r])}"
+                            )
+                    searches_done += 1
+                    continue
+
                 # Refusal safety net: if the LLM tries to exit the loop on
-                # iter 0 with a refusal-style answer (cutoff, "I cannot",
+                # any iteration with a refusal-style answer (cutoff, "I cannot",
                 # etc.) and no search has been done yet, force a search
                 # with the original prompt and re-prompt with the
                 # observations. The LLM almost always returns a real,
-                # sourced answer on iter 2 once it has search context.
-                if (i == 0 and searches_done == 0
+                # sourced answer once it has search context.
+                if (searches_done == 0
                         and _looks_like_refusal(answer)):
-                    for r in search_cached(prompt, max_results=max_results):
+                    for r in search_cached(prompt, max_results=DEFAULT_MAX_RESULTS):
                         if r["url"] not in seen_urls:
                             seen_urls.add(r["url"])
                             all_results.append(r)
@@ -871,15 +971,13 @@ def run_research_agentic(prompt: str, model: str = DEFAULT_MODEL,
                                 f"time-sensitive question, query: "
                                 f"\"{prompt}\"):\n{format_context([r])}"
                             )
-                    if show_snippets:
-                        _print_sources(all_results)
                     searches_done += 1
                     continue
                 break
 
             if action.get("action") == "search":
                 query = action.get("query", prompt)
-                for r in search_cached(query, max_results=max_results):
+                for r in search_cached(query, max_results=DEFAULT_MAX_RESULTS):
                     if r["url"] not in seen_urls:
                         seen_urls.add(r["url"])
                         all_results.append(r)
@@ -887,8 +985,6 @@ def run_research_agentic(prompt: str, model: str = DEFAULT_MODEL,
                             f"Observation {i+1} (query: \"{query}\"):\n"
                             f"{format_context([r])}"
                         )
-                if show_snippets:
-                    _print_sources(all_results)
                 searches_done += 1
                 continue
 
@@ -929,9 +1025,9 @@ REPL_PROMPT = "❓ "
 def run_repl(args: list[str], input_func=None) -> None:
     """Interactive REPL that keeps context between questions.
 
-    Reads parsed CLI args (without --repl) to get depth/model/etc.
-    Maintains a rolling history; each new question sees the prior Q&A as
-    context, so follow-ups like 'what about its climate?' make sense.
+    Reads the prompt and a single trailing `--stream` flag from `args`.
+    Maintains a rolling history; each new question sees the prior Q&A
+    as context, so follow-ups like "what about its climate?" make sense.
 
     Special inputs:
         /exit, /quit, exit, quit  -> end the session
@@ -943,22 +1039,7 @@ def run_repl(args: list[str], input_func=None) -> None:
     """
     if input_func is None:
         input_func = input
-    # Reuse the parsed flag values from main() — re-parse minimally here.
-    depth = 1
-    if "--depth" in args:
-        idx = args.index("--depth")
-        if idx + 1 < len(args):
-            depth = max(1, min(int(args[idx + 1]), 3))
-    max_results = DEFAULT_MAX_RESULTS
-    if "--max-results" in args:
-        idx = args.index("--max-results")
-        if idx + 1 < len(args):
-            max_results = int(args[idx + 1])
-    model = DEFAULT_MODEL
-    if "--model" in args:
-        idx = args.index("--model")
-        if idx + 1 < len(args):
-            model = args[idx + 1]
+    stream = "--stream" in args
 
     print("\n💬 REPL mode — type a question, /clear to reset history, /exit to quit.\n")
     history: list[tuple[str, str]] = []
@@ -985,10 +1066,7 @@ def run_repl(args: list[str], input_func=None) -> None:
         # Build context from prior Q&A and run a single research turn.
         context = build_repl_context(history) or None
         try:
-            response, results, usage = _run_research(
-                question, depth=depth, max_results=max_results,
-                model=model, fallback=DEFAULT_FALLBACK, context=context,
-            )
+            response, results, usage = _run_research(question, context=context)
         except SystemExit:
             raise
         except Exception as e:
@@ -998,14 +1076,7 @@ def run_repl(args: list[str], input_func=None) -> None:
         print()
         print(response)
         print(f"\n{'─' * 40}")
-        if usage.get("total_tokens"):
-            llm_cost = usage.get('cost_usd', 0)
-            tavily_n = usage.get('tavily_searches', 0)
-            tavily_cost = usage.get('tavily_cost_usd', 0.0)
-            print(f"  Tokens:    {usage.get('prompt_tokens', 0)}↑ + {usage.get('completion_tokens', 0)}↓ = {usage['total_tokens']}")
-            print(f"  LLM cost:  ${llm_cost:.5f}")
-            print(f"  Tavily:    {tavily_n} search × ${TAVILY_COST_PER_SEARCH_USD:.4f} = ${tavily_cost:.5f}")
-            print(f"  Total:     ${llm_cost + tavily_cost:.5f}")
+        _print_footer(usage)
         sources = format_sources(results)
         if sources:
             print(f"\n{sources}")
@@ -1296,111 +1367,37 @@ def main(args: list[str] | None = None) -> None:
     if args is None:
         args = sys.argv[1:]
 
-    # --- Subcommands (no API keys required up-front; needed only when run) ---
+    # --- Subcommands ---------------------------------------------------------
     if args and args[0] == "eval":
         _run_eval_cli(args[1:])
         return
 
-    _require_env(API_KEY_ENV)
-    _require_env(TAVILY_KEY_ENV)
-
+    # --- Flags (only UX ones; quality knobs are constants) ------------------
     gen_report = "--report" in args
-    args = [a for a in args if a != "--report"]
-
-    show_snippets = "--show-snippets" in args
-    args = [a for a in args if a != "--show-snippets"]
-
     stream = "--stream" in args
-    args = [a for a in args if a != "--stream"]
-
-    depth = 1
-    if "--depth" in args:
-        idx = args.index("--depth")
-        if idx + 1 < len(args):
-            depth = int(args[idx + 1])
-            args = args[:idx] + args[idx + 2:]
-    depth = max(1, min(depth, 3))  # clamp 1..3
-
-    max_results = DEFAULT_MAX_RESULTS
-    if "--max-results" in args:
-        idx = args.index("--max-results")
-        if idx + 1 < len(args):
-            max_results = int(args[idx + 1])
-            args = args[:idx] + args[idx + 2:]
-
-    model = DEFAULT_MODEL
-    if "--model" in args:
-        idx = args.index("--model")
-        if idx + 1 < len(args):
-            model = args[idx + 1]
-            args = args[:idx] + args[idx + 2:]
-
-    agentic = "--agentic" in args
-    args = [a for a in args if a != "--agentic"]
-
     repl = "--repl" in args
-    args = [a for a in args if a != "--repl"]
-
-    verify = "--verify" in args
-    args = [a for a in args if a != "--verify"]
 
     if repl:
-        run_repl(args)
+        run_repl([a for a in args if a != "--repl"])
         return
 
-    prompt = " ".join(args) if args else input("❓ ")
+    pcfg = _get_provider_config(DEFAULT_PROVIDER)
+    _require_env(pcfg["api_key_env"])
+    _require_env(TAVILY_KEY_ENV)
+
+    prompt = " ".join(a for a in args if not a.startswith("--")) if args else input("❓ ")
     if not prompt:
         print("Nothing to ask.")
         return
 
-    print(f"\n🔍 Searching the web for: {prompt} (depth={depth}{', agentic' if agentic else ''})")
+    print(f"\n🔍 Searching the web for: {prompt} (depth={DEFAULT_DEPTH})")
     if stream:
-        _run_research_streaming(prompt, depth=depth, max_results=max_results,
-                                 model=model, fallback=DEFAULT_FALLBACK,
-                                 show_snippets=show_snippets)
-    elif agentic:
-        response, results, usage = run_research_agentic(prompt, model=model,
-                                                         fallback=DEFAULT_FALLBACK,
-                                                         max_iterations=depth + 2,
-                                                         show_snippets=show_snippets)
-        print(response)
-        print(f"\n{'─' * 40}")
-        if usage.get("total_tokens"):
-            llm_cost = usage.get('cost_usd', 0)
-            tavily_n = usage.get('tavily_searches', 0)
-            tavily_cost = usage.get('tavily_cost_usd', 0.0)
-            print(f"  Tokens:    {usage.get('prompt_tokens', 0)}↑ + {usage.get('completion_tokens', 0)}↓ = {usage['total_tokens']}")
-            print(f"  LLM cost:  ${llm_cost:.5f}")
-            print(f"  Tavily:    {tavily_n} search × ${TAVILY_COST_PER_SEARCH_USD:.4f} = ${tavily_cost:.5f}")
-            print(f"  Total:     ${llm_cost + tavily_cost:.5f}")
-        sources = format_sources(results)
-        if sources:
-            print(f"\n{sources}")
+        _run_research_streaming(prompt)
     else:
-        response, results, usage = _run_research(prompt, depth=depth,
-                                                   max_results=max_results,
-                                                   model=model,
-                                                   fallback=DEFAULT_FALLBACK,
-                                                   show_snippets=show_snippets)
+        response, results, usage = _run_research(prompt)
         print(response)
-        if verify and results:
-            print(f"\n🔎 Verifying citations...")
-            v = verify_citations(response, results, model=model)
-            if v["verified"]:
-                print(f"  ✅ All citations verified ({len(results)} sources checked)")
-            else:
-                print(f"  ⚠️  {len(v['issues'])} issue(s) found:")
-                for issue in v["issues"]:
-                    print(f"    - {issue.get('citation', '?')}: {issue.get('reason', '?')}")
         print(f"\n{'─' * 40}")
-        if usage.get("total_tokens"):
-            llm_cost = usage.get('cost_usd', 0)
-            tavily_n = usage.get('tavily_searches', 0)
-            tavily_cost = usage.get('tavily_cost_usd', 0.0)
-            print(f"  Tokens:    {usage.get('prompt_tokens', 0)}↑ + {usage.get('completion_tokens', 0)}↓ = {usage['total_tokens']}")
-            print(f"  LLM cost:  ${llm_cost:.5f}")
-            print(f"  Tavily:    {tavily_n} search × ${TAVILY_COST_PER_SEARCH_USD:.4f} = ${tavily_cost:.5f}")
-            print(f"  Total:     ${llm_cost + tavily_cost:.5f}")
+        _print_footer(usage)
         sources = format_sources(results)
         if sources:
             print(f"\n{sources}")

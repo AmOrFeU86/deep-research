@@ -1,6 +1,6 @@
 """Shared fixtures for deep-research tests.
 
-Loads OPENROUTER_API_KEY and TAVILY_API_KEY from ~/.bashrc so tests can
+Loads MINIMAX_API_KEY and TAVILY_API_KEY from ~/.bashrc so tests can
 hit the real APIs in integration mode (the early-return in .bashrc
 prevents them from being in os.environ for non-interactive shells).
 """
@@ -82,9 +82,9 @@ def tavily_key():
 
 
 @pytest.fixture
-def openrouter_key():
-    """Skip integration tests if OPENROUTER_API_KEY is missing."""
-    key = os.environ.get("OPENROUTER_API_KEY")
+def minimax_key():
+    """Skip integration tests if MINIMAX_API_KEY is missing."""
+    key = os.environ.get("MINIMAX_API_KEY")
     if not key:
-        pytest.skip("OPENROUTER_API_KEY not available")
+        pytest.skip("MINIMAX_API_KEY not available")
     return key

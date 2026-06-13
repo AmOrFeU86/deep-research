@@ -178,3 +178,62 @@ def test_agentic_returns_search_results_in_final_return():
 
     assert len(results) == 1
     assert results[0]["url"] == "https://a.com"
+
+
+# ─────────────────────── min_searches enforcement ───────────────────────
+
+
+def test_min_searches_forces_searches_before_allowing_answer():
+    """min_searches=N forces the loop to perform at least N Tavily searches
+    even if the LLM tries to answer earlier. Early "answer" actions are
+    silently overridden with a forced search of the original prompt.
+    """
+    from dr import run_research_agentic
+
+    # LLM tries to answer on every turn — should be overridden while
+    # searches_done < min_searches, then accepted once the budget is met.
+    responses = iter([
+        _llm_json_response({"action": "answer", "answer": "too early 1"}),
+        _llm_json_response({"action": "answer", "answer": "too early 2"}),
+        _llm_json_response({"action": "answer", "answer": "final real answer"}),
+    ])
+
+    with patch("dr.OpenAI") as MockOpenAI:
+        instance = MockOpenAI.return_value
+        instance.chat.completions.create.side_effect = lambda **kwargs: next(responses)
+        with patch("dr.search_cached") as mock_search:
+            mock_search.return_value = SAMPLE_RESULTS
+            answer, results, usage = run_research_agentic(
+                "Capital of France?", min_searches=2, max_iterations=10
+            )
+
+    # Forced searches on the first two "answer" attempts: 2 total
+    assert mock_search.call_count == 2
+    # Third LLM call returns a real answer, loop ends cleanly
+    assert answer == "final real answer"
+    # System prompt on the first LLM call MUST include the min_searches directive
+    first_call_msgs = instance.chat.completions.create.call_args_list[0].kwargs["messages"]
+    assert any("at least 2" in m["content"] for m in first_call_msgs)
+    # And the usage reflects 2 Tavily searches
+    assert usage["tavily_searches"] == 2
+
+
+def test_min_searches_zero_preserves_lazy_behavior():
+    """min_searches=0 (the default) means no enforcement — LLM can answer
+    on the first turn as before. Regression guard.
+    """
+    from dr import run_research_agentic
+
+    with patch("dr.OpenAI") as MockOpenAI:
+        instance = MockOpenAI.return_value
+        instance.chat.completions.create.return_value = _llm_json_response(
+            {"action": "answer", "answer": "Paris"}
+        )
+        with patch("dr.search_cached") as mock_search:
+            answer, _, _ = run_research_agentic("X", min_searches=0)
+
+    assert answer == "Paris"
+    assert mock_search.call_count == 0
+    # System prompt does NOT include the min_searches directive
+    first_call_msgs = instance.chat.completions.create.call_args_list[0].kwargs["messages"]
+    assert not any("at least" in m["content"] for m in first_call_msgs)

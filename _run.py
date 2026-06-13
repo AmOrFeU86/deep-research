@@ -12,7 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-ENV_VARS = ["OPENROUTER_API_KEY", "TAVILY_API_KEY"]
+ENV_VARS = ["MINIMAX_API_KEY", "TAVILY_API_KEY"]
 
 
 def _load_bashrc_value(var: str) -> str | None:

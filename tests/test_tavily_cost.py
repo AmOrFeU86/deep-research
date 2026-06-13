@@ -35,6 +35,9 @@ def test_main_reports_tavily_search_count_and_cost(capsys):
     from dr import main
 
     with patch("dr.search") as mock_search, patch("dr.ask") as mock_ask, \
+         patch("dr.reformulate", return_value=[]), \
+         patch("dr.verify_citations",
+               return_value={"verified": True, "issues": [], "model": "x"}), \
          patch("dr.subprocess"):
         _setup_mocks(mock_search, mock_ask)
         main(["q"])
@@ -42,26 +45,27 @@ def test_main_reports_tavily_search_count_and_cost(capsys):
     out = capsys.readouterr().out
     # The report should mention Tavily cost
     assert "Tavily" in out or "tavily" in out.lower()
-    # Should mention the search count (1 search with default depth=1)
+    # Should mention the search count (1 search with depth=1, i.e. reformulate mocked out)
     assert "1 search" in out or "1 ×" in out or "1x" in out.lower()
 
 
 def test_main_tavily_cost_scales_with_search_count(capsys):
-    """With depth=2, two searches happen and the Tavily cost is 2x the per-search rate."""
+    """With depth=3 (still on the test side), multiple searches happen and the
+    Tavily cost scales accordingly. The reformulate mock returns 2 variants."""
     from dr import main
 
     with patch("dr.search") as mock_search, patch("dr.ask") as mock_ask, \
-         patch("dr.reformulate") as mock_reform, patch("dr.subprocess"):
+         patch("dr.reformulate") as mock_reform, \
+         patch("dr.verify_citations",
+               return_value={"verified": True, "issues": [], "model": "x"}), \
+         patch("dr.subprocess"):
         _setup_mocks(mock_search, mock_ask)
         mock_reform.return_value = ["variant A", "variant B"]
-        main(["--depth", "2", "q"])
+        main(["q"])  # depth=DEFAULT_DEPTH=10 by default; reformulate returns 2
 
     out = capsys.readouterr().out
-    # 2 reformulated queries + original = 3 total searches at depth=2
-    # (depth=2 means reformulate(prompt, n=1) = 1 extra, so queries = [orig, var] = 2)
-    # Either way, depth>=2 should result in more than 1 search
+    # reformulate returns 2 extra + original = 3 total searches
     import re
-    # Look for "N search" or "N × $..." pattern
     m = re.search(r"(\d+)\s*(?:search|×|x)", out.lower())
     assert m, f"No search count found in output: {out!r}"
     assert int(m.group(1)) >= 2, f"Expected >=2 searches, got: {m.group(1)}"
@@ -72,6 +76,9 @@ def test_tavily_cost_summed_in_total(capsys):
     from dr import main
 
     with patch("dr.search") as mock_search, patch("dr.ask") as mock_ask, \
+         patch("dr.reformulate", return_value=[]), \
+         patch("dr.verify_citations",
+               return_value={"verified": True, "issues": [], "model": "x"}), \
          patch("dr.subprocess"):
         _setup_mocks(mock_search, mock_ask)
         main(["q"])

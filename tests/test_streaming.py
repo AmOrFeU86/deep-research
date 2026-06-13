@@ -114,6 +114,9 @@ def test_main_with_stream_flag_prints_tokens_progressively(capsys):
 
     with patch("dr.search_cached") as mock_search, \
          patch("dr.ask") as mock_ask, \
+         patch("dr.reformulate", return_value=[]), \
+         patch("dr.verify_citations",
+               return_value={"verified": True, "issues": [], "model": "x"}), \
          patch("dr.subprocess"):
         mock_search.return_value = []
         # ask(stream=True) returns an iterator
@@ -133,6 +136,8 @@ def test_main_without_stream_flag_uses_blocking_ask(capsys):
 
     with patch("dr.search_cached") as mock_search, \
          patch("dr.ask") as mock_ask, \
+         patch("dr.verify_citations",
+               return_value={"verified": True, "issues": [], "model": "x"}), \
          patch("dr.subprocess"):
         mock_search.return_value = []
         mock_ask.return_value = ("full response", {"total_tokens": 10, "cost_usd": 0})

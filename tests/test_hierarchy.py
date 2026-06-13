@@ -6,7 +6,7 @@ That way the dashboard can show a tree:
 
     research (OPERATION)
     ├── tavily.search (TOOL)
-    └── llm.deepseek... (LLM)
+    └── llm.<model> (LLM)
 """
 import pytest
 from unittest.mock import MagicMock, patch
@@ -51,7 +51,9 @@ def test_tavily_search_span_is_child_of_research():
     from treval.db import SpanStore
 
     with patch("dr.TavilyClient") as MockClient, \
-         patch("dr.OpenAI") as MockOpenAI:
+         patch("dr.OpenAI") as MockOpenAI, \
+         patch("dr.reformulate", return_value=[]), \
+         patch("dr.SELF_CRITIQUE", False):
         MockClient.return_value.search.return_value = {"results": [
             {"url": "https://a.com", "title": "A", "content": "aaa"},
         ]}
@@ -72,7 +74,7 @@ def test_tavily_search_span_is_child_of_research():
         assert t["parent_id"] == research_id
 
 
-def test_llm_span_is_child_of_research(openrouter_key, tavily_key):
+def test_llm_span_is_child_of_research(minimax_key, tavily_key):
     """[integration] Real OpenAI + treval.instrument: LLM span has research as parent."""
     from dr import _run_research
     from treval.db import SpanStore

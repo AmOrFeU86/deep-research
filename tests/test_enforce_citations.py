@@ -94,11 +94,14 @@ def test_enforce_citations_realistic_oversized_at_end():
     assert invalid == [99]
 
 
-def test_run_research_warns_on_invalid_citations(capsys):
-    """When the LLM returns a [N] that points past len(sources), the CLI
-    prints a warning so the user knows the citation is broken. The
-    response text is left untouched (we only warn, don't strip)."""
+def test_run_research_with_self_critique_off_warns_on_invalid_citations(capsys):
+    """When SELF_CRITIQUE is False, an invalid [N] from the LLM triggers
+    the static regex warn (the old behavior). With SELF_CRITIQUE=True
+    (the default), verify_citations is the safety net instead — see
+    test_source_report.py and the gold-set eval for that path.
+    """
     from unittest.mock import patch
+    import dr
 
     fake_results = [
         {"url": "https://a.com", "title": "A", "content": "a"},
@@ -106,14 +109,14 @@ def test_run_research_warns_on_invalid_citations(capsys):
     ]
     fake_response = "Per [1] and a hallucinated [7] citation, the answer is [2]."
 
-    with patch("dr.search", return_value=fake_results), \
+    with patch.object(dr, "SELF_CRITIQUE", False), \
+         patch("dr.search", return_value=fake_results), \
          patch("dr.reformulate", return_value=[]), \
          patch("dr.ask", return_value=(fake_response, {
              "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2,
              "cost_usd": 0.0,
          })):
-        response, _, _ = dr._run_research("test query", depth=1,
-                                          max_results=2, model="x")
+        response, _, _ = dr._run_research("test query", depth=1)
 
     out = capsys.readouterr().out
     assert "Invalid citations" in out

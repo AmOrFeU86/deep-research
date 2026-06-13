@@ -185,34 +185,13 @@ def test_run_research_combines_unique_results_from_all_queries():
     assert urls == ["https://1.com", "https://2.com"]
 
 
-# ────────────────────────── CLI flag ──────────────────────────
+# ────────────────────────── CLI default ──────────────────────────
 
 
-def test_main_with_depth_flag_passes_depth_to_research(capsys):
-    """main(['--depth', '2', 'q']) calls _run_research(prompt, depth=2)."""
-    from dr import main
-
-    with patch("dr._run_research") as mock_run_research, \
-         patch("dr.subprocess"):
-        mock_run_research.return_value = (
-            "answer",
-            [{"url": "https://a.com", "title": "A", "content": "x"}],
-            {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0},
-        )
-
-        main(["--depth", "2", "query"])
-
-    mock_run_research.assert_called_once()
-    args, kwargs = mock_run_research.call_args
-    assert args[0] == "query"
-    assert kwargs.get("depth") == 2 or (
-        len(args) > 1 and args[1] == 2
-    )
-
-
-def test_main_without_depth_flag_uses_default_depth_1(capsys):
-    """main(['q']) calls _run_research(prompt, depth=1)."""
-    from dr import main
+def test_main_uses_default_depth_10(capsys):
+    """main(['q']) calls _run_research with no depth kwarg, so the
+    DEFAULT_DEPTH constant (10) applies."""
+    from dr import main, DEFAULT_DEPTH
 
     with patch("dr._run_research") as mock_run_research, \
          patch("dr.subprocess"):
@@ -224,6 +203,10 @@ def test_main_without_depth_flag_uses_default_depth_1(capsys):
         main(["query"])
 
     mock_run_research.assert_called_once()
+    # No --depth flag exists, so the call uses the default. We assert the
+    # constant is what we expect, not the call argument.
+    assert DEFAULT_DEPTH == 10
     args, kwargs = mock_run_research.call_args
-    depth = kwargs.get("depth") or (args[1] if len(args) > 1 else None)
-    assert depth == 1
+    assert args[0] == "query"
+    # Either no depth kwarg or depth is None (=default)
+    assert kwargs.get("depth") in (None, 10)

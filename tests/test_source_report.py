@@ -1,7 +1,7 @@
 """Tests for #9: Source report as structured span input/output.
 
 The parent OPERATION span (research / research_stream / research_agentic)
-now stores the full source list as structured metadata, not just prints
+stores the full source list as structured metadata, not just prints
 them to stdout. This makes the sources queryable and inspectable from
 the treval dashboard without re-running the search.
 
@@ -33,11 +33,12 @@ def test_research_span_metadata_has_num_sources():
     ]
     with patch("dr.search", return_value=fake_results), \
          patch("dr.reformulate", return_value=[]), \
+         patch("dr.SELF_CRITIQUE", False), \
          patch("dr.ask", return_value=("answer", {
              "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2,
              "cost_usd": 0.0,
          })):
-        dr._run_research("test", depth=1, max_results=3, model="x")
+        dr._run_research("test", depth=1)
 
     spans = store.list_spans(type="OPERATION")
     assert len(spans) == 1
@@ -58,11 +59,12 @@ def test_research_span_metadata_has_full_source_list():
     ]
     with patch("dr.search", return_value=fake_results), \
          patch("dr.reformulate", return_value=[]), \
+         patch("dr.SELF_CRITIQUE", False), \
          patch("dr.ask", return_value=("answer", {
              "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
              "cost_usd": 0.0,
          })):
-        dr._run_research("test", depth=1, max_results=2, model="x")
+        dr._run_research("test", depth=1)
 
     meta = json.loads(store.list_spans(type="OPERATION")[0]["metadata"])
     assert len(meta["sources"]) == 2
@@ -87,11 +89,12 @@ def test_research_span_metadata_has_tavily_counts():
     ]
     with patch("dr.search", return_value=fake_results), \
          patch("dr.reformulate", return_value=["q2", "q3"]), \
+         patch("dr.SELF_CRITIQUE", False), \
          patch("dr.ask", return_value=("answer", {
              "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
              "cost_usd": 0.0,
          })):
-        dr._run_research("test", depth=3, max_results=2, model="x")
+        dr._run_research("test", depth=3)
 
     meta = json.loads(store.list_spans(type="OPERATION")[0]["metadata"])
     # depth=3 means 1 original query + 2 reformulated = 3 searches
@@ -109,11 +112,12 @@ def test_research_span_metadata_handles_empty_results():
 
     with patch("dr.search", return_value=[]), \
          patch("dr.reformulate", return_value=[]), \
+         patch("dr.SELF_CRITIQUE", False), \
          patch("dr.ask", return_value=("no info", {
              "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
              "cost_usd": 0.0,
          })):
-        dr._run_research("test", depth=1, max_results=3, model="x")
+        dr._run_research("test", depth=1)
 
     meta = json.loads(store.list_spans(type="OPERATION")[0]["metadata"])
     assert meta["num_sources"] == 0
@@ -135,11 +139,12 @@ def test_research_span_metadata_reflects_dedup():
     ]
     with patch("dr.search", return_value=fake_results), \
          patch("dr.reformulate", return_value=[]), \
+         patch("dr.SELF_CRITIQUE", False), \
          patch("dr.ask", return_value=("answer", {
              "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
              "cost_usd": 0.0,
          })):
-        dr._run_research("test", depth=1, max_results=3, model="x")
+        dr._run_research("test", depth=1)
 
     meta = json.loads(store.list_spans(type="OPERATION")[0]["metadata"])
     assert meta["num_sources"] == 2
@@ -159,8 +164,9 @@ def test_streaming_research_span_metadata_has_sources():
     ]
     with patch("dr.search", return_value=fake_results), \
          patch("dr.reformulate", return_value=[]), \
+         patch("dr.SELF_CRITIQUE", False), \
          patch("dr.ask", return_value=iter(["a", "b", "nswer"])):
-        dr._run_research_streaming("test", depth=1, max_results=2, model="x")
+        dr._run_research_streaming("test", depth=1)
 
     spans = store.list_spans(type="OPERATION")
     assert len(spans) == 1
@@ -189,7 +195,7 @@ def test_agentic_research_span_metadata_has_sources():
              (final_answer, {"prompt_tokens": 1, "completion_tokens": 1,
                              "total_tokens": 2, "cost_usd": 0.0}),
          ]):
-        dr.run_research_agentic("test", max_iterations=3, model="x")
+        dr.run_research_agentic("test", max_iterations=3)
 
     spans = store.list_spans(type="OPERATION")
     assert len(spans) == 1
