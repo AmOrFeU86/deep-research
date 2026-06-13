@@ -8,15 +8,27 @@ Since the default depth is 10, we patch `dr.reformulate` to return []
 in most tests so they exercise the same single-query path the old
 depth=1 default used. Tests that explicitly want to exercise
 reformulation can leave the mock off.
+
+We also patch `dr.verify_citations` to return verified=True without
+hitting the network. SELF_CRITIQUE is True by default in dr.py, so
+any test that lets real (mocked) search results through would otherwise
+trigger a real second LLM call for the verifier — slow and $$$.
 """
-import subprocess
-from unittest.mock import MagicMock, patch
+import pytest
+from unittest.mock import patch
+
+from dr import main
 
 
 SAMPLE_RESULTS = [
     {"url": "https://a.com", "title": "A", "content": "aaa"},
     {"url": "https://b.com", "title": "B", "content": "bbb"},
 ]
+
+# Default return for the verify_citations mock: "all good, no issues".
+# Tests that want to exercise the self-critique path should leave it
+# unpatched (or return {"verified": False, ...}) instead.
+_VERIFY_OK = {"verified": True, "issues": [], "model": "stub"}
 
 
 def _setup_mocks(mock_search, mock_ask, text="the answer"):
@@ -30,10 +42,9 @@ def _setup_mocks(mock_search, mock_ask, text="the answer"):
 
 def test_main_always_searches_before_asking(capsys):
     """main() runs search() before ask() — web research is always on."""
-    from dr import main
-
     with patch("dr.search") as mock_search, patch("dr.ask") as mock_ask, \
          patch("dr.reformulate", return_value=[]), \
+         patch("dr.verify_citations", return_value=_VERIFY_OK), \
          patch("dr.subprocess"):
         _setup_mocks(mock_search, mock_ask)
         main(["what is X?"])
@@ -50,10 +61,9 @@ def test_main_always_searches_before_asking(capsys):
 
 def test_main_prints_sources_after_response(capsys):
     """After the LLM answer, the sources from Tavily are printed to stdout."""
-    from dr import main
-
     with patch("dr.search") as mock_search, patch("dr.ask") as mock_ask, \
          patch("dr.reformulate", return_value=[]), \
+         patch("dr.verify_citations", return_value=_VERIFY_OK), \
          patch("dr.subprocess"):
         _setup_mocks(mock_search, mock_ask)
         main(["anything"])
@@ -66,10 +76,9 @@ def test_main_prints_sources_after_response(capsys):
 
 def test_main_prints_llm_response(capsys):
     """The LLM's answer text is printed to stdout."""
-    from dr import main
-
     with patch("dr.search") as mock_search, patch("dr.ask") as mock_ask, \
          patch("dr.reformulate", return_value=[]), \
+         patch("dr.verify_citations", return_value=_VERIFY_OK), \
          patch("dr.subprocess"):
         _setup_mocks(mock_search, mock_ask, text="the answer is 42")
         main(["question"])
@@ -80,10 +89,9 @@ def test_main_prints_llm_response(capsys):
 
 def test_main_reads_prompt_from_argv(capsys):
     """When argv has a prompt, main() uses it (no stdin read)."""
-    from dr import main
-
     with patch("dr.search") as mock_search, patch("dr.ask") as mock_ask, \
          patch("dr.reformulate", return_value=[]), \
+         patch("dr.verify_citations", return_value=_VERIFY_OK), \
          patch("dr.subprocess"), patch("dr.input") as mock_input:
         _setup_mocks(mock_search, mock_ask)
         main(["from argv"])
@@ -95,10 +103,9 @@ def test_main_reads_prompt_from_argv(capsys):
 
 def test_main_prompts_via_stdin_when_no_argv(capsys):
     """When no prompt in argv AND stdin is a TTY, main() reads from stdin."""
-    from dr import main
-
     with patch("dr.search") as mock_search, patch("dr.ask") as mock_ask, \
          patch("dr.reformulate", return_value=[]), \
+         patch("dr.verify_citations", return_value=_VERIFY_OK), \
          patch("dr.subprocess"), patch("dr.input", return_value="from stdin") as mock_input, \
          patch("dr.sys.stdin.isatty", return_value=True):
         _setup_mocks(mock_search, mock_ask)
@@ -110,10 +117,9 @@ def test_main_prompts_via_stdin_when_no_argv(capsys):
 
 def test_main_runs_treval_dashboard_export_with_report_flag(capsys):
     """With --report, main() invokes `treval dashboard --export report.html`."""
-    from dr import main
-
     with patch("dr.search") as mock_search, patch("dr.ask") as mock_ask, \
          patch("dr.reformulate", return_value=[]), \
+         patch("dr.verify_citations", return_value=_VERIFY_OK), \
          patch("dr.subprocess.run") as mock_run:
         _setup_mocks(mock_search, mock_ask)
         main(["--report", "q"])
@@ -128,10 +134,9 @@ def test_main_runs_treval_dashboard_export_with_report_flag(capsys):
 
 def test_main_skips_dashboard_export_without_report_flag(capsys):
     """Without --report, main() does NOT invoke the dashboard export."""
-    from dr import main
-
     with patch("dr.search") as mock_search, patch("dr.ask") as mock_ask, \
          patch("dr.reformulate", return_value=[]), \
+         patch("dr.verify_citations", return_value=_VERIFY_OK), \
          patch("dr.subprocess.run") as mock_run:
         _setup_mocks(mock_search, mock_ask)
         main(["q"])
@@ -141,15 +146,28 @@ def test_main_skips_dashboard_export_without_report_flag(capsys):
 
 def test_main_exits_with_error_if_minimax_key_missing(capsys):
     """main() aborts with a clear message if MINIMAX_API_KEY is missing."""
-    from dr import main
-
     with patch.dict("os.environ", {}, clear=True), \
          patch("dr.search") as mock_search:
         # Need to also remove TAVILY_API_KEY so search() doesn't try Tavily
-        with __import__("pytest").raises(SystemExit) as exc:
+        with pytest.raises(SystemExit) as exc:
             main(["q"])
         assert exc.value.code == 1
 
     out = capsys.readouterr().out
     assert "MINIMAX_API_KEY" in out
     mock_search.assert_not_called()
+
+
+def test_get_provider_config_unknown_provider_exits_2(capsys):
+    """_get_provider_config with an unknown name exits 2 with a clear
+    message listing the valid providers. Centralises the
+    'is this provider registered?' guard.
+    """
+    from dr import _get_provider_config
+
+    with pytest.raises(SystemExit) as exc:
+        _get_provider_config("not-a-real-provider")
+    assert exc.value.code == 2
+    out = capsys.readouterr().out
+    assert "not-a-real-provider" in out
+    assert "minimax" in out  # lists the valid options

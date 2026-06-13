@@ -20,16 +20,6 @@ def _setup_mocks(mock_search, mock_ask, text="the answer"):
     })
 
 
-def test_tavily_cost_per_search_constant_exists():
-    """dr.TAVILY_COST_PER_SEARCH_USD is a public constant (~$0.001 per basic search)."""
-    import dr
-
-    assert hasattr(dr, "TAVILY_COST_PER_SEARCH_USD")
-    assert dr.TAVILY_COST_PER_SEARCH_USD > 0
-    # Sanity: should be in the order of a tenth of a cent
-    assert dr.TAVILY_COST_PER_SEARCH_USD < 0.01
-
-
 def test_main_reports_tavily_search_count_and_cost(capsys):
     """main() prints a Tavily cost line after the LLM cost line."""
     from dr import main

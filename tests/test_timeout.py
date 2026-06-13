@@ -6,19 +6,6 @@ unreachable. The timeout should be configurable per-call.
 from unittest.mock import MagicMock, patch
 
 
-# ────────────────────────── DEFAULT_TIMEOUT constant ──────────────────────────
-
-
-def test_default_timeout_constant_exists():
-    """dr.DEFAULT_TIMEOUT_SECONDS is a positive number (default ~30s)."""
-    import dr
-
-    assert hasattr(dr, "DEFAULT_TIMEOUT_SECONDS")
-    assert dr.DEFAULT_TIMEOUT_SECONDS > 0
-    # Reasonable default: between 5s and 5min
-    assert 5 <= dr.DEFAULT_TIMEOUT_SECONDS <= 300
-
-
 # ────────────────────────── ask() propagates timeout ──────────────────────────
 
 

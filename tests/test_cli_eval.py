@@ -6,6 +6,7 @@ summary, and exits non-zero if the pass rate is below threshold.
 """
 import json
 import tempfile
+import pytest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -145,6 +146,25 @@ def test_eval_exits_zero_when_pass_rate_equals_threshold(capsys):
     with patch("dr._run_eval", return_value=report):
         # No SystemExit should be raised
         dr.main(["eval", "--threshold", "0.7"])
+
+
+# ---------------------------------------------------------------------------
+# Bad-flag handling
+# ---------------------------------------------------------------------------
+
+
+@_eval_env
+def test_eval_unknown_flag_exits_with_code_2(capsys):
+    """An unknown flag to `dr eval` exits 2 (bad flags) and prints
+    a hint pointing to `dr eval --help`. The dispatcher in
+    `_run_eval_cli` has a `default` branch that catches this.
+    """
+    with pytest.raises(SystemExit) as exc:
+        dr.main(["eval", "--bogus-flag"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "Unknown flag" in err or "bogus-flag" in err
+    assert "dr eval --help" in err
 
 
 # ---------------------------------------------------------------------------

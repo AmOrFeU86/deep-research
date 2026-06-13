@@ -7,6 +7,9 @@ import json
 import pytest
 from unittest.mock import patch
 
+from dr import __version__
+from dr import main, USAGE
+
 
 def _setup_mocks(mock_search, mock_ask):
     """Common mock setup: search returns 1 result, ask returns a canned answer."""
@@ -24,8 +27,7 @@ def _setup_mocks(mock_search, mock_ask):
 
 def test_main_help_prints_usage(capsys):
     """`dr --help` prints USAGE and exits 0."""
-    from dr import main, USAGE
-    with __import__("pytest").raises(SystemExit) as exc:
+    with pytest.raises(SystemExit) as exc:
         main(["--help"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
@@ -36,8 +38,7 @@ def test_main_help_prints_usage(capsys):
 
 def test_main_short_help_works(capsys):
     """`dr -h` is the short form of --help."""
-    from dr import main
-    with __import__("pytest").raises(SystemExit) as exc:
+    with pytest.raises(SystemExit) as exc:
         main(["-h"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
@@ -46,8 +47,7 @@ def test_main_short_help_works(capsys):
 
 def test_main_help_subcommand_prints_usage(capsys):
     """`dr help` (no subcommand) prints the top-level USAGE and exits 0."""
-    from dr import main
-    with __import__("pytest").raises(SystemExit) as exc:
+    with pytest.raises(SystemExit) as exc:
         main(["help"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
@@ -56,8 +56,7 @@ def test_main_help_subcommand_prints_usage(capsys):
 
 def test_main_help_eval_prints_eval_usage(capsys):
     """`dr help eval` prints EVAL_USAGE with --json, --depth, etc., exits 0."""
-    from dr import main
-    with __import__("pytest").raises(SystemExit) as exc:
+    with pytest.raises(SystemExit) as exc:
         main(["help", "eval"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
@@ -69,8 +68,7 @@ def test_main_help_eval_prints_eval_usage(capsys):
 
 def test_main_version_prints_version(capsys):
     """`dr --version` prints the version string and exits 0."""
-    from dr import main, __version__
-    with __import__("pytest").raises(SystemExit) as exc:
+    with pytest.raises(SystemExit) as exc:
         main(["--version"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
@@ -84,8 +82,7 @@ def test_eval_help_prints_eval_usage(capsys):
     Verifies it shows the eval-specific doc (not the top-level USAGE
     that just happens to mention eval as a subcommand).
     """
-    from dr import main, USAGE
-    with __import__("pytest").raises(SystemExit) as exc:
+    with pytest.raises(SystemExit) as exc:
         main(["eval", "--help"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
@@ -102,8 +99,6 @@ def test_eval_help_prints_eval_usage(capsys):
 
 def test_main_json_emits_valid_json(capsys):
     """`dr --json "q"` prints a JSON object with answer, sources, usage."""
-    from dr import main
-
     with patch("dr.search") as mock_search, patch("dr.ask") as mock_ask, \
          patch("dr.reformulate", return_value=[]), \
          patch("dr.parallel_search", return_value=[
@@ -133,8 +128,6 @@ def test_main_json_emits_valid_json(capsys):
 
 def test_main_json_progress_goes_to_stderr(capsys):
     """With --json, the progress line goes to stderr, not stdout."""
-    from dr import main
-
     with patch("dr.search") as mock_search, patch("dr.ask") as mock_ask, \
          patch("dr.reformulate", return_value=[]), \
          patch("dr.parallel_search", return_value=[]), \
@@ -155,7 +148,6 @@ def test_main_json_progress_goes_to_stderr(capsys):
 
 def test_eval_json_emits_report_dict(capsys):
     """`dr eval --json` prints the full report as JSON."""
-    from dr import main
     fake = {
         "num_questions": 2, "mean_score": 0.85, "pass_rate": 1.0,
         "num_passed": 2, "num_failed": 0, "threshold": 0.7,
@@ -180,7 +172,6 @@ def test_eval_json_emits_report_dict(capsys):
 
 def test_eval_json_handles_unicode(capsys):
     """JSON output preserves non-ASCII characters (Spanish questions)."""
-    from dr import main
     fake = {
         "num_questions": 1, "mean_score": 1.0, "pass_rate": 1.0,
         "num_passed": 1, "num_failed": 0, "threshold": 0.7,
@@ -204,12 +195,10 @@ def test_eval_json_handles_unicode(capsys):
 
 def test_main_no_args_non_tty_exits_with_error(capsys):
     """`dr` with no args and non-TTY (e.g. agent subprocess) exits 2 with usage hint."""
-    from dr import main
-
     with patch("dr.sys.stdin.isatty", return_value=False), \
          patch("dr.input") as mock_input, \
          patch.dict("os.environ", {"MINIMAX_API_KEY": "x", "TAVILY_API_KEY": "y"}):
-        with __import__("pytest").raises(SystemExit) as exc:
+        with pytest.raises(SystemExit) as exc:
             main([])
 
     assert exc.value.code == 2
@@ -221,10 +210,8 @@ def test_main_no_args_non_tty_exits_with_error(capsys):
 
 def test_main_empty_prompt_non_tty_exits_1(capsys):
     """`dr ""` (whitespace only) exits 1, not silent success."""
-    from dr import main
-
     with patch.dict("os.environ", {"MINIMAX_API_KEY": "x", "TAVILY_API_KEY": "y"}):
-        with __import__("pytest").raises(SystemExit) as exc:
+        with pytest.raises(SystemExit) as exc:
             main(["   "])
 
     assert exc.value.code == 1

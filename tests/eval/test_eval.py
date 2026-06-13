@@ -205,3 +205,27 @@ def _make_minimal_gold(n: int = 1) -> str:
                 "criteria": [f"criterion {i}.1", f"criterion {i}.2"],
             }) + "\n")
     return str(tmp)
+
+
+# ---------------------------------------------------------------------------
+# Edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_run_eval_with_empty_gold_set_returns_zero_stats():
+    """An empty gold set yields num_questions=0 and mean_score/pass_rate=0.0
+    (no division-by-zero on the summary stats). Smoke guard for the
+    `mean(scores)/n` and `num_passed/n` divisions.
+    """
+    empty = str(Path(tempfile.mkstemp(suffix=".jsonl")[1]))
+    Path(empty).write_text("")  # valid JSONL, zero entries
+
+    report = dr._run_eval(gold_path=empty)
+
+    assert report["num_questions"] == 0
+    assert report["mean_score"] == 0.0
+    assert report["pass_rate"] == 0.0
+    assert report["num_passed"] == 0
+    assert report["num_failed"] == 0
+    assert report["total_cost_usd"] == 0.0
+    assert report["results"] == []

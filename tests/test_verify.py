@@ -158,3 +158,24 @@ def test_verify_citations_handles_invalid_json():
     # and report the parse error as an issue.
     assert "verified" in result
     assert "issues" in result
+
+
+def test_verify_citations_with_no_sources_skips_llm():
+    """When sources=[] the verifier short-circuits to verified=True without
+    calling the LLM. Saves a network call on the common "no results found"
+    case (and the response would be meaningless anyway without sources).
+    """
+    from dr import verify_citations
+
+    with patch("dr.OpenAI") as MockOpenAI:
+        instance = MockOpenAI.return_value
+        instance.chat.completions.create.return_value = _mock_llm_json({
+            "verified": False, "issues": [{"citation": "[1]", "reason": "..."}],
+        })
+
+        result = verify_citations("anything", [])
+
+    assert result["verified"] is True
+    assert result["issues"] == []
+    # And critically: no LLM call was made
+    instance.chat.completions.create.assert_not_called()

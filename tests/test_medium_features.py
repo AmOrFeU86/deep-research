@@ -51,6 +51,7 @@ def test_default_max_results_is_three():
     with patch("dr.search_cached") as mock_search, \
          patch("dr.ask") as mock_ask, \
          patch("dr.reformulate", return_value=[]), \
+         patch("dr.verify_citations", return_value={"verified": True, "issues": [], "model": "x"}), \
          patch("dr.subprocess"):
         mock_search.return_value = []
         mock_ask.return_value = ("ok", {"total_tokens": 0, "cost_usd": 0})
@@ -192,3 +193,29 @@ def test_ask_does_not_retry_on_400_bad_request():
             ask("query", max_retries=3)
 
     assert instance.chat.completions.create.call_count == 1
+
+
+# ────────────────────────── estimate_cost() edge cases ──────────────────────────
+
+
+def test_estimate_cost_unknown_model_returns_zero():
+    """estimate_cost() returns 0.0 for any model not in MODEL_PRICES.
+
+    This is the documented fallback — we don't want a missing price
+    entry to crash the cost footer or report.py.
+    """
+    from dr import estimate_cost
+
+    # 1000 prompt + 1000 completion tokens on an unknown model
+    assert estimate_cost("unknown/model-name", 1000, 1000) == 0.0
+    # Sanity: known model still prices correctly
+    assert estimate_cost("MiniMax-M3", 1000, 1000) > 0.0
+
+
+def test_estimate_cost_zero_tokens_returns_zero():
+    """estimate_cost(0, 0) is 0 regardless of model — guards against
+    empty-usage footers in the dashboard when usage reporting is None.
+    """
+    from dr import estimate_cost
+
+    assert estimate_cost("MiniMax-M3", 0, 0) == 0.0

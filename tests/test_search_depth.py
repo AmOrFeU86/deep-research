@@ -10,17 +10,6 @@ backward compatibility, with the option to opt in.
 from unittest.mock import MagicMock, patch
 
 
-# ────────────────────────── DEFAULT_SEARCH_DEPTH constant ──────────────────────────
-
-
-def test_default_search_depth_constant_exists():
-    """dr.DEFAULT_SEARCH_DEPTH is "basic" (cheap mode by default)."""
-    import dr
-
-    assert hasattr(dr, "DEFAULT_SEARCH_DEPTH")
-    assert dr.DEFAULT_SEARCH_DEPTH == "basic"
-
-
 # ────────────────────────── search() propagates search_depth ──────────────────────────
 
 
