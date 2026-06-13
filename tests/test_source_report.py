@@ -151,30 +151,6 @@ def test_research_span_metadata_reflects_dedup():
     assert len(meta["sources"]) == 2
 
 
-def test_streaming_research_span_metadata_has_sources():
-    """The streaming variant also stores sources in the OPERATION span metadata."""
-    from treval.db import SpanStore
-
-    store = SpanStore()
-    store.clear()
-
-    fake_results = [
-        {"url": "https://a.com", "title": "A", "content": "a"},
-        {"url": "https://b.com", "title": "B", "content": "b"},
-    ]
-    with patch("dr.search", return_value=fake_results), \
-         patch("dr.reformulate", return_value=[]), \
-         patch("dr.SELF_CRITIQUE", False), \
-         patch("dr.ask", return_value=iter(["a", "b", "nswer"])):
-        dr._run_research_streaming("test", depth=1)
-
-    spans = store.list_spans(type="OPERATION")
-    assert len(spans) == 1
-    meta = json.loads(spans[0]["metadata"])
-    assert meta["num_sources"] == 2
-    assert len(meta["sources"]) == 2
-
-
 def test_agentic_research_span_metadata_has_sources():
     """The agentic (ReAct) loop variant also stores sources in the OPERATION span."""
     from treval.db import SpanStore

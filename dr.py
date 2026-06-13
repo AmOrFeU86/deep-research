@@ -435,7 +435,7 @@ def _is_transient_error(exc: Exception) -> bool:
 
 def ask(prompt: str, context: str | None = None,
         system: str | None = None,
-        max_retries: int = MAX_RETRIES, stream: bool = False,
+        max_retries: int = MAX_RETRIES,
         timeout: float | None = DEFAULT_TIMEOUT_SECONDS):
     """Call the LLM with retry-on-transient.
 
@@ -443,8 +443,7 @@ def ask(prompt: str, context: str | None = None,
     errors (network, timeout, 429, 5xx). Non-transient errors (auth,
     bad request) raise immediately.
 
-    If stream=True, returns an iterator yielding text tokens.
-    If stream=False, returns a (full_text, usage_dict) tuple.
+    Returns a (full_text, usage_dict) tuple.
     """
     import time
 
@@ -460,35 +459,6 @@ def ask(prompt: str, context: str | None = None,
     messages.append({"role": "user", "content": user_content})
 
     last_exc: Exception | None = None
-
-    def _stream_response():
-        """Yield text tokens from a streaming response."""
-        for attempt in range(max_retries):
-            try:
-                resp = client.chat.completions.create(
-                    model=DEFAULT_MODEL,
-                    messages=messages,
-                    temperature=DEFAULT_TEMPERATURE,
-                    max_tokens=2000,
-                    stream=True,
-                    timeout=timeout,
-                )
-                for chunk in resp:
-                    if chunk.choices and chunk.choices[0].delta.content:
-                        yield chunk.choices[0].delta.content
-                return
-            except Exception as e:
-                nonlocal last_exc
-                last_exc = e
-                if not _is_transient_error(e):
-                    raise
-                if attempt < max_retries - 1:
-                    time.sleep(RETRY_BASE_SECONDS * (2 ** attempt))
-        if last_exc is not None:
-            raise last_exc
-
-    if stream:
-        return _stream_response()
 
     for attempt in range(max_retries):
         try:
@@ -695,74 +665,6 @@ def _run_research(prompt: str, depth: int = DEFAULT_DEPTH,
                      metadata=_source_metadata(all_results, tavily_searches,
                                                usage["tavily_cost_usd"]))
         return response, all_results, usage
-    finally:
-        pop_span()
-
-
-def _run_research_streaming(prompt: str, depth: int = DEFAULT_DEPTH) -> None:
-    """Same as _run_research but prints the LLM response as it streams in.
-
-    Streaming responses do not include token usage on the final chunk
-    (depends on the provider), so the footer reports the Tavily half of
-    the cost. The LLM tokens/cost are omitted rather than estimated.
-    """
-    from treval.context import pop_span, push_span
-    from treval.db import SpanStore
-
-    store = SpanStore()
-    root_id = store.save(
-        name="research",
-        type="OPERATION",
-        status="ok",
-        input=f"{prompt} [depth={depth}, stream]",
-    )
-    push_span(root_id)
-    try:
-        queries = [prompt]
-        if depth > 1:
-            extra = reformulate(prompt, n=depth - 1)
-            queries.extend(extra)
-            if not extra:
-                queries = [prompt]
-
-        all_results = parallel_search(queries, max_results=DEFAULT_MAX_RESULTS,
-                                      parent_id=root_id)
-
-        # Stream the response, printing tokens as they arrive
-        full_response = []
-        for token in ask(prompt, context=format_context(all_results),
-                         stream=True):
-            print(token, end="", flush=True)
-            full_response.append(token)
-        print()  # newline after stream completes
-        response = "".join(full_response)
-
-        # Self-critique: re-prompt if verify_citations finds issues
-        if SELF_CRITIQUE:
-            response, verify_report, _ = _self_critique(
-                prompt, response, all_results, format_context(all_results), {},
-            )
-            if not verify_report["verified"]:
-                print(f"  ⚠️  Self-critique re-prompted: "
-                      f"{len(verify_report['issues'])} issue(s) flagged")
-        else:
-            _, invalid = enforce_citations(response, num_sources=len(all_results))
-            if invalid:
-                print(f"  ⚠️  Invalid citations in response: {invalid} "
-                      f"(only {len(all_results)} sources available)")
-
-        print(f"\n{'─' * 40}")
-        sources = format_sources(all_results)
-        if sources:
-            print(f"\n{sources}")
-        tavily_searches = len(queries)
-        tavily_cost = round(tavily_searches * TAVILY_COST_PER_SEARCH_USD, 5)
-        print(f"  Tavily:    {tavily_searches} search × "
-              f"${TAVILY_COST_PER_SEARCH_USD:.4f} = ${tavily_cost:.5f}")
-        print(f"  (stream: LLM token cost not reported)")
-        store.update(root_id, output=response,
-                     metadata=_source_metadata(all_results, tavily_searches,
-                                               tavily_cost))
     finally:
         pop_span()
 
@@ -1025,7 +927,6 @@ REPL_PROMPT = "❓ "
 def run_repl(args: list[str], input_func=None) -> None:
     """Interactive REPL that keeps context between questions.
 
-    Reads the prompt and a single trailing `--stream` flag from `args`.
     Maintains a rolling history; each new question sees the prior Q&A
     as context, so follow-ups like "what about its climate?" make sense.
 
@@ -1039,7 +940,6 @@ def run_repl(args: list[str], input_func=None) -> None:
     """
     if input_func is None:
         input_func = input
-    stream = "--stream" in args
 
     print("\n💬 REPL mode — type a question, /clear to reset history, /exit to quit.\n")
     history: list[tuple[str, str]] = []
@@ -1374,7 +1274,6 @@ def main(args: list[str] | None = None) -> None:
 
     # --- Flags (only UX ones; quality knobs are constants) ------------------
     gen_report = "--report" in args
-    stream = "--stream" in args
     repl = "--repl" in args
 
     if repl:
@@ -1391,16 +1290,13 @@ def main(args: list[str] | None = None) -> None:
         return
 
     print(f"\n🔍 Searching the web for: {prompt} (depth={DEFAULT_DEPTH})")
-    if stream:
-        _run_research_streaming(prompt)
-    else:
-        response, results, usage = _run_research(prompt)
-        print(response)
-        print(f"\n{'─' * 40}")
-        _print_footer(usage)
-        sources = format_sources(results)
-        if sources:
-            print(f"\n{sources}")
+    response, results, usage = _run_research(prompt)
+    print(response)
+    print(f"\n{'─' * 40}")
+    _print_footer(usage)
+    sources = format_sources(results)
+    if sources:
+        print(f"\n{sources}")
 
     if gen_report:
         path = os.path.join(os.path.dirname(__file__), "report.html")

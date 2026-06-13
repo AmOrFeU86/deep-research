@@ -25,7 +25,6 @@ Sources:
 - 🔁 **Self-critique pass** — after the first answer, a second LLM pass verifies every citation; if issues are found, the model is re-prompted with the critique and the rewritten answer replaces the original. No `−−verify` flag needed — always on.
 - 🔁 **Retry with backoff + 429/5xx handling** — resilient to network, rate limits, and server errors.
 - 💸 **Real cost report** — LLM tokens + Tavily searches summed in the footer.
-- 📺 **Optional streaming** — `−−stream` shows the response token by token.
 - 💾 **Local cache with 24h TTL** — repeated searches cost nothing.
 - 📊 **Auto-instrumented with treval** — every run creates 3-7 spans (OPERATION → TOOL → LLM) visible in the HTML dashboard.
 - 🧪 **`dr eval`** — bundled gold set of 10 Q&A + LLM-as-judge for response-quality regression testing.
@@ -60,12 +59,6 @@ The default LLM provider is **minimax** (model `MiniMax-M3`), hardcoded in `dr.p
 
 ```bash
 python dr.py "What is the capital of France?"
-```
-
-### Streaming
-
-```bash
-python dr.py --stream "Explain the CAP theorem"
 ```
 
 ### Interactive REPL
@@ -104,8 +97,6 @@ Each run prints:
    - `Tavily:` number of searches × unit cost
    - `Total:` sum
 3. **Sources:** URLs of the consulted sources.
-
-Streaming prints the answer as it arrives, then a reduced footer (Tavily cost only; LLM token counts aren't available mid-stream).
 
 ## Quality knobs (constants, not flags)
 
