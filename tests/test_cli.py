@@ -94,12 +94,13 @@ def test_main_reads_prompt_from_argv(capsys):
 
 
 def test_main_prompts_via_stdin_when_no_argv(capsys):
-    """When no prompt in argv, main() reads from stdin."""
+    """When no prompt in argv AND stdin is a TTY, main() reads from stdin."""
     from dr import main
 
     with patch("dr.search") as mock_search, patch("dr.ask") as mock_ask, \
          patch("dr.reformulate", return_value=[]), \
-         patch("dr.subprocess"), patch("dr.input", return_value="from stdin") as mock_input:
+         patch("dr.subprocess"), patch("dr.input", return_value="from stdin") as mock_input, \
+         patch("dr.sys.stdin.isatty", return_value=True):
         _setup_mocks(mock_search, mock_ask)
         main([])
 

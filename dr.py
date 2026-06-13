@@ -11,6 +11,68 @@ import treval
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+__version__ = "0.2.0"
+
+USAGE = f"""\
+dr {__version__} — Deep Research CLI
+
+USAGE
+  dr [--json] [--report] PROMPT
+  dr eval [--gold PATH] [--threshold FLOAT] [--depth N] [--json]
+  dr help [SUBCOMMAND]
+  dr --version
+
+SUBCOMMANDS
+  eval       Run the eval suite against the gold set (CI-friendly)
+
+GLOBAL FLAGS
+  -h, --help     Show this help and exit
+  --version      Print version and exit
+  --json         Emit structured JSON instead of formatted text
+  --report       After answering, regenerate the treval HTML dashboard
+
+SINGLE-SHOT MODE (default)
+  dr "What is the capital of France?"
+  Output: synthesized answer, sources, and a usage footer.
+
+EVAL MODE
+  dr eval                          Run the full gold set
+  dr eval --gold path.jsonl        Use a custom gold set
+  dr eval --threshold 0.8          Pass threshold (default 0.7)
+  dr eval --depth 10               Research depth per question (default 1)
+  dr eval --json                   Emit the report as JSON
+  Exit codes: 0 = passed, 1 = below threshold, 2 = error
+
+QUALITY KNOBS (depth, model, search depth) are constants in dr.py by design.
+See DR_DEFAULTS below or read the module docstring.
+"""
+
+EVAL_USAGE = """\
+dr eval — Run the eval suite against a gold set
+
+USAGE
+  dr eval [--gold PATH] [--threshold FLOAT] [--depth N] [--json]
+
+FLAGS
+  --gold PATH        Path to gold.jsonl (default: bundled tests/eval/gold.jsonl)
+  --threshold FLOAT  Pass threshold in [0, 1] (default: 0.7)
+  --depth N          Research depth for each question (default: 1)
+                     Pass 10 to match production settings
+  --json             Emit the full report as JSON
+  -h, --help         Show this help and exit
+
+EXIT CODES
+  0   Pass rate >= threshold
+  1   Pass rate < threshold (CI failure)
+  2   Bad flags or runtime error
+
+EXAMPLES
+  dr eval --depth 1                          # fast smoke run
+  dr eval --depth 10 --threshold 0.8         # production-like
+  dr eval --json | jq '.mean_score'          # parse score with jq
+  dr eval --gold my-set.jsonl --json         # custom gold set as JSON
+"""
+
 from openai import OpenAI
 from tavily import TavilyClient
 
@@ -1173,7 +1235,15 @@ def _run_eval_cli(args: list[str]) -> None:
       --gold PATH        path to gold.jsonl (default: bundled)
       --threshold FLOAT  pass threshold in [0, 1] (default: 0.7)
       --depth N          research depth for each question (default: 1)
+      --json             emit the report as JSON instead of a table
+      -h, --help         print eval usage and exit 0
+
+    Exit codes: 0 on pass, 1 on threshold fail, 2 on bad flags.
     """
+    if "--help" in args or "-h" in args:
+        print(EVAL_USAGE)
+        sys.exit(0)
+
     pcfg = _get_provider_config(DEFAULT_PROVIDER)
     _require_env(pcfg["api_key_env"])
     _require_env(TAVILY_KEY_ENV)
@@ -1181,6 +1251,7 @@ def _run_eval_cli(args: list[str]) -> None:
     gold_path: str | None = None
     threshold = DEFAULT_PASS_THRESHOLD
     depth = 1
+    as_json = False
 
     i = 0
     while i < len(args):
@@ -1191,23 +1262,56 @@ def _run_eval_cli(args: list[str]) -> None:
             threshold = float(args[i + 1]); i += 2
         elif a == "--depth" and i + 1 < len(args):
             depth = max(1, int(args[i + 1])); i += 2
+        elif a == "--json":
+            as_json = True; i += 1
         else:
-            print(f"Unknown flag for `dr eval`: {a}")
+            print(f"Unknown flag for `dr eval`: {a}", file=sys.stderr)
+            print(f"Run `dr eval --help` for usage.", file=sys.stderr)
             sys.exit(2)
 
     report = _run_eval(gold_path=gold_path, threshold=threshold, depth=depth)
-    _print_eval_report(report)
+
+    if as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        _print_eval_report(report)
 
     # CI mode: if pass rate is below threshold, exit non-zero so CI can fail.
     if report["pass_rate"] < threshold:
-        print(f"  ✗ Pass rate {report['pass_rate'] * 100:.0f}% is below "
-              f"threshold {threshold * 100:.0f}%. Exit 1.")
+        if not as_json:
+            print(f"  ✗ Pass rate {report['pass_rate'] * 100:.0f}% is below "
+                  f"threshold {threshold * 100:.0f}%. Exit 1.")
         sys.exit(1)
 
 
 def main(args: list[str] | None = None) -> None:
+    """Entry point.
+
+    Exit codes: 0 success, 1 user error, 2 bad flags/missing PROMPT.
+    """
     if args is None:
         args = sys.argv[1:]
+
+    # --- Subcommand-specific help (handled before top-level --help) -------
+    # `dr eval --help` and `dr help eval` should both show EVAL_USAGE.
+    if args and args[0] == "eval" and ("--help" in args[1:] or "-h" in args[1:]):
+        print(EVAL_USAGE)
+        sys.exit(0)
+
+    # --- Top-level flags (handled before subcommand dispatch) ---------------
+    if "--help" in args or "-h" in args:
+        print(USAGE)
+        sys.exit(0)
+    if "--version" in args:
+        print(f"dr {__version__}")
+        sys.exit(0)
+    if args and args[0] in ("help", "?"):
+        sub = args[1] if len(args) > 1 else None
+        if sub == "eval":
+            print(EVAL_USAGE)
+        else:
+            print(USAGE)
+        sys.exit(0)
 
     # --- Subcommands ---------------------------------------------------------
     if args and args[0] == "eval":
@@ -1216,31 +1320,71 @@ def main(args: list[str] | None = None) -> None:
 
     # --- Flags (only UX ones; quality knobs are constants) ------------------
     gen_report = "--report" in args
+    as_json = "--json" in args
 
     pcfg = _get_provider_config(DEFAULT_PROVIDER)
     _require_env(pcfg["api_key_env"])
     _require_env(TAVILY_KEY_ENV)
 
-    prompt = " ".join(a for a in args if not a.startswith("--")) if args else input("❓ ")
-    if not prompt:
-        print("Nothing to ask.")
-        return
-
-    print(f"\n🔍 Searching the web for: {prompt} (depth={DEFAULT_DEPTH})")
-    response, results, usage = _run_research(prompt)
-    print(response)
-    print(f"\n{'─' * 40}")
-    _print_footer(usage)
-    sources = format_sources(results)
-    if sources:
-        print(f"\n{sources}")
-
-    if gen_report:
-        path = os.path.join(os.path.dirname(__file__), "report.html")
-        subprocess.run(["treval", "dashboard", "--export", path], check=True)
+    # Strip flags from the prompt. The `--json` and `--report` flags are
+    # not part of the user's question.
+    prompt_tokens = [a for a in args if not a.startswith("--")]
+    if prompt_tokens:
+        prompt = " ".join(prompt_tokens)
+    elif sys.stdin.isatty():
+        # Interactive: only when a real terminal is attached. This is the
+        # one place we keep the `input()` prompt — for human REPL use.
+        prompt = input("❓ ")
     else:
-        print(f"\n  📊 treval dashboard --export report.html  — generate report")
-    print()
+        # Non-interactive (CI, agent subprocess): no args = no prompt.
+        # Print usage to stderr and exit 2 — a clear error for the caller.
+        print("dr: missing PROMPT. Run `dr --help` for usage.",
+              file=sys.stderr)
+        sys.exit(2)
+
+    if not prompt.strip():
+        print("Nothing to ask.", file=sys.stderr)
+        sys.exit(1)
+
+    if as_json:
+        # Single-line progress to stderr so stdout stays clean for parsing
+        print(f"🔍 Searching the web for: {prompt} (depth={DEFAULT_DEPTH})",
+              file=sys.stderr)
+    else:
+        print(f"\n🔍 Searching the web for: {prompt} (depth={DEFAULT_DEPTH})")
+    response, results, usage = _run_research(prompt)
+
+    if as_json:
+        payload = {
+            "answer": response,
+            "sources": [
+                {"url": r.get("url"), "title": r.get("title"),
+                 "snippet": r.get("content", "")}
+                for r in results
+            ],
+            "usage": {
+                "total_tokens": usage.get("total_tokens", 0),
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+                "cost_usd": usage.get("cost_usd", 0.0),
+                "tavily_searches": usage.get("tavily_searches", 0),
+                "tavily_cost_usd": usage.get("tavily_cost_usd", 0.0),
+            },
+        }
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(response)
+        print(f"\n{'─' * 40}")
+        _print_footer(usage)
+        sources = format_sources(results)
+        if sources:
+            print(f"\n{sources}")
+        if gen_report:
+            path = os.path.join(os.path.dirname(__file__), "report.html")
+            subprocess.run(["treval", "dashboard", "--export", path], check=True)
+        else:
+            print(f"\n  📊 treval dashboard --export report.html  — generate report")
+        print()
 
 
 if __name__ == "__main__":
