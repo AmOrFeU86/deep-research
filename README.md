@@ -61,14 +61,6 @@ The default LLM provider is **minimax** (model `MiniMax-M3`), hardcoded in `dr.p
 python dr.py "What is the capital of France?"
 ```
 
-### Interactive REPL
-
-```bash
-python dr.py --repl
-```
-
-The REPL keeps a rolling Q&A history — each new question sees prior turns as context, so follow-ups like *"what about its climate?"* make sense. Commands: `/clear` (reset history), `/exit` or `/quit` (end session).
-
 ### Generate HTML dashboard
 
 ```bash

@@ -597,16 +597,12 @@ def _print_footer(usage: dict) -> None:
     print(f"  Total:     ${llm_cost + tavily_cost:.5f}")
 
 
-def _run_research(prompt: str, depth: int = DEFAULT_DEPTH,
-                  context: str | None = None) -> tuple[str, list[dict], dict]:
+def _run_research(prompt: str, depth: int = DEFAULT_DEPTH) -> tuple[str, list[dict], dict]:
     """Run a full research task wrapped in a parent OPERATION span.
 
     With depth=1: 1 search of the original query.
     With depth=N>1: reformulate prompt into N-1 variants, search all N,
     merge results deduped by URL, then ask the LLM with the full context.
-
-    If `context` is provided, it is prepended to the prompt sent to the
-    LLM (used by the REPL to carry prior Q&A across turns).
 
     Creates a 'research' OPERATION span and pushes it onto the context
     stack, so nested @treval.tool spans (Tavily) and the auto-instrumented
@@ -638,10 +634,9 @@ def _run_research(prompt: str, depth: int = DEFAULT_DEPTH,
         all_results = parallel_search(queries, max_results=DEFAULT_MAX_RESULTS,
                                       parent_id=root_id)
 
-        # Combine REPL history (if any) with the search results before asking.
+        # Combine search results into the context for the LLM.
         search_ctx = format_context(all_results)
-        merged_context = f"{context}\n\n---\n\n{search_ctx}" if context else search_ctx
-        response, usage = ask(prompt, context=merged_context)
+        response, usage = ask(prompt, context=search_ctx)
         tavily_searches = len(queries)
         usage["tavily_searches"] = tavily_searches
         usage["tavily_cost_usd"] = round(tavily_searches * TAVILY_COST_PER_SEARCH_USD, 5)
@@ -649,7 +644,7 @@ def _run_research(prompt: str, depth: int = DEFAULT_DEPTH,
         # Self-critique: re-prompt if verify_citations finds issues
         if SELF_CRITIQUE:
             response, verify_report, usage = _self_critique(
-                prompt, response, all_results, merged_context, usage,
+                prompt, response, all_results, search_ctx, usage,
             )
             if not verify_report["verified"]:
                 print(f"  ⚠️  Self-critique re-prompted: "
@@ -904,86 +899,6 @@ def run_research_agentic(prompt: str, max_iterations: int = 3,
         return answer, all_results, total_usage
     finally:
         pop_span()
-
-
-def build_repl_context(history: list[tuple[str, str]]) -> str:
-    """Format prior Q&A as a context string for the next question.
-
-    Returns "" for empty history. Each Q&A is prefixed with [Turn N] so
-    the LLM can distinguish them and the user can debug if needed.
-    """
-    if not history:
-        return ""
-    blocks = []
-    for i, (q, a) in enumerate(history, start=1):
-        blocks.append(f"[Turn {i}]\nQ: {q}\nA: {a}")
-    return "\n\n".join(blocks)
-
-
-REPL_COMMANDS_EXIT = {"/exit", "/quit", "exit", "quit"}
-REPL_PROMPT = "❓ "
-
-
-def run_repl(args: list[str], input_func=None) -> None:
-    """Interactive REPL that keeps context between questions.
-
-    Maintains a rolling history; each new question sees the prior Q&A
-    as context, so follow-ups like "what about its climate?" make sense.
-
-    Special inputs:
-        /exit, /quit, exit, quit  -> end the session
-        /clear                    -> wipe the history
-        (blank line)              -> ignored
-
-    `input_func` is injectable for tests; defaults to the module-level
-    `input` (which tests can patch via `patch("dr.input", ...)`).
-    """
-    if input_func is None:
-        input_func = input
-
-    print("\n💬 REPL mode — type a question, /clear to reset history, /exit to quit.\n")
-    history: list[tuple[str, str]] = []
-
-    while True:
-        try:
-            raw = input_func(REPL_PROMPT)
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return
-
-        if raw is None:
-            return
-        question = raw.strip()
-        if not question:
-            continue
-        if question.lower() in REPL_COMMANDS_EXIT:
-            return
-        if question == "/clear":
-            history = []
-            print("  (history cleared)\n")
-            continue
-
-        # Build context from prior Q&A and run a single research turn.
-        context = build_repl_context(history) or None
-        try:
-            response, results, usage = _run_research(question, context=context)
-        except SystemExit:
-            raise
-        except Exception as e:
-            print(f"  Error: {e}\n")
-            continue
-
-        print()
-        print(response)
-        print(f"\n{'─' * 40}")
-        _print_footer(usage)
-        sources = format_sources(results)
-        if sources:
-            print(f"\n{sources}")
-        print()
-
-        # Update history for the next turn.
-        history.append((question, response))
 
 
 # ---------------------------------------------------------------------------
@@ -1274,11 +1189,6 @@ def main(args: list[str] | None = None) -> None:
 
     # --- Flags (only UX ones; quality knobs are constants) ------------------
     gen_report = "--report" in args
-    repl = "--repl" in args
-
-    if repl:
-        run_repl([a for a in args if a != "--repl"])
-        return
 
     pcfg = _get_provider_config(DEFAULT_PROVIDER)
     _require_env(pcfg["api_key_env"])
